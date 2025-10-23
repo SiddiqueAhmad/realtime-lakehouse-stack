@@ -1,0 +1,245 @@
+services:
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    hostname: metabase
+    depends_on:
+      - db
+    volumes:
+      - /dev/urandom:/dev/random:ro
+    ports:
+      - 3000:3000
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabaseappdb
+      MB_DB_PORT: 5432
+      MB_DB_USER: testuser
+      MB_DB_PASS: testpass
+      MB_DB_HOST: db
+      MB_SETUP_TOKEN: your_token # Use a strong random string here
+    networks:
+      - iceberg_net
+    healthcheck:
+      test: curl --fail -I http://localhost:3000/api/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  metabase-setup:
+    build:
+      context: .
+      dockerfile: metabase/Dockerfile.metabase-setup
+    container_name: metabase-setup
+    depends_on:
+      metabase:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      trino:
+        condition: service_started
+    networks:
+      - iceberg_net
+    environment:
+      # Metabase Details
+      MB_URL: http://metabase:3000
+      MB_SETUP_TOKEN: your_token
+      # Admin User Details
+      MB_ADMIN_EMAIL: admin@example.com
+      MB_ADMIN_PASSWORD: YourSecurePassword1!
+      MB_ADMIN_FIRST_NAME: Admin
+      MB_ADMIN_LAST_NAME: User
+      MB_SITE_NAME: My Iceberg Data Platform
+      # Inventory DB Details
+      INVENTORY_DB_HOST: db
+      INVENTORY_DB_USER: testuser
+      INVENTORY_DB_PASS: testpass
+      INVENTORY_DB_DBNAME: inventory
+      # Trino Details
+      TRINO_DB_HOST: trino
+      TRINO_DB_USER: admin # Default trino user
+      TRINO_DB_SCHEMA: icebergdata
+    restart: "no"
+  debezium-iceberg:
+    image: ghcr.io/memiiso/debezium-server-iceberg:latest
+    container_name: debezium-server-iceberg
+    networks:
+      iceberg_net:
+    depends_on:
+      - lakekeeper
+      - minio
+      - db
+      - mc
+    volumes:
+      - ./debezium-server-conf/application.properties:/app/conf/application.properties
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+
+  db:
+    image: timescale/timescaledb-ha:pg17
+    container_name: db
+    networks:
+      iceberg_net:
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=test
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U testuser -p 5432 -d test" ]
+      interval: 2s
+      timeout: 10s
+      retries: 2
+      start_period: 10s
+    volumes:
+      - ./timescale/init-all.sh:/docker-entrypoint-initdb.d/01-init-all.sh
+      - ./timescale/inventory.sql:/docker-entrypoint-initdb.d/inventory.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+      - MINIO_DOMAIN=warehouse
+      - MINIO_BUCKET=warehouse
+    networks:
+      iceberg_net:
+        aliases:
+          - warehouse
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    command: ["server", "/data", "--console-address", ":9001"]
+  mc:
+    image: minio/mc
+    container_name: mc
+    networks:
+      iceberg_net:
+    depends_on:
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set minio http://192.168.1.5:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb --ignore-existing minio/warehouse;
+      /usr/bin/mc anonymous set public minio/warehouse;
+      exit 0;
+      "
+  lakekeeper:
+    image: &lakekeeper-image ${LAKEKEEPER__SERVER_IMAGE:-quay.io/lakekeeper/catalog:latest-main}
+    pull_policy: &lakekeeper-pull-policy if_not_present
+    environment: &lakekeeper-environment
+      - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
+      - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://testuser:testpass@db:5432/test
+      - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://testuser:testpass@db:5432/test
+      - LAKEKEEPER__AUTHZ_BACKEND=allowall
+      # Externally taken from environment variables if set
+      - LAKEKEEPER__BASE_URI=http://192.168.1.5:8181/
+      - LAKEKEEPER__AUTHZ_BACKEND=allowall
+    command: [ "serve" ]
+    healthcheck:
+      test: [ "CMD", "/home/nonroot/lakekeeper", "healthcheck" ]
+      interval: 1s
+      timeout: 10s
+      retries: 3
+      start_period: 3s
+    depends_on:
+      migrate:
+          condition: service_completed_successfully
+    ports:
+      - "8181:8181"
+    networks:
+      iceberg_net:
+
+  bootstrap:
+    image: curlimages/curl
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://192.168.1.5:8181/management/v1/bootstrap"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - '{"accept-terms-of-use": true}'
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+    networks:
+      iceberg_net:
+
+  initialwarehouse:
+    image: curlimages/curl
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+      mc:
+        condition: service_completed_successfully
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://192.168.1.5:8181/management/v1/warehouse"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - "@create-warehouse-warehouse.json"
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+    volumes:
+      - ./lakekeeper/create-warehouse-warehouse.json:/home/curl_user/create-warehouse-warehouse.json
+    networks:
+      iceberg_net:
+
+  migrate:
+    image: *lakekeeper-image
+    pull_policy: *lakekeeper-pull-policy
+    environment: *lakekeeper-environment
+    restart: "no"
+    command: [ "migrate" ]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      iceberg_net:
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    networks:
+      iceberg_net:
+    depends_on:
+      - lakekeeper
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino:/etc/trino
+
+networks:
+  iceberg_net:
+    name: icebergnet

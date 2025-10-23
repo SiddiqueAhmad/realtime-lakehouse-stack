@@ -1,0 +1,13 @@
+{
+  "token": "your_token",
+  "user": {
+    "first_name": "Admin",
+    "last_name": "User",
+    "email": "admin@example.com",
+    "password": "YourSecurePassword1!"
+  },
+  "prefs": {
+    "allow_tracking": false,
+    "site_name": "My Iceberg Data Platform"
+  }
+}

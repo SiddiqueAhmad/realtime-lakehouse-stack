@@ -1,0 +1,21 @@
+{
+  "warehouse-name": "warehouse",
+  "project-id": "00000000-0000-0000-0000-000000000000",
+  "storage-profile": {
+    "type": "s3",
+    "bucket": "warehouse",
+    "key-prefix": "icebergdata",
+    "assume-role-arn": null,
+    "endpoint": "http://192.168.1.5:9000",
+    "region": "us-east-1",
+    "path-style-access": true,
+    "flavor": "minio",
+    "sts-enabled": true
+  },
+  "storage-credential": {
+    "type": "s3",
+    "credential-type": "access-key",
+    "aws-access-key-id": "admin",
+    "aws-secret-access-key": "password"
+  }
+}
