@@ -70,7 +70,7 @@ services:
       - db
       - mc
     volumes:
-      - ./debezium-server-conf/application.properties:/app/conf/application.properties
+      - ./debezium-server-conf/application.properties:/debezium/config/application.properties
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
