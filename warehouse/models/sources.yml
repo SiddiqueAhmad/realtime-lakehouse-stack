@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: inventory
+    database: iceberg
+    schema: icebergdata
+    tables:
+      - name: debeziumcdc_dbz__inventory_orders
+      - name: debeziumcdc_dbz__inventory_customers
+      - name: debeziumcdc_dbz__inventory_products

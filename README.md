@@ -63,10 +63,35 @@ Once started:
 
 ---
 
-## 🧩 Coming Next
+## 🤖 Data Transformation with dbt
 
-- 🔄 Automated dbt/sqlmesh transformations  
-- 🧪 Airflow orchestration example  
+This project uses dbt for SQL-based data transformation. The dbt project is located in the `warehouse` directory. We have implemented a Bronze-Silver-Gold Medallion Architecture for our data pipeline.
+
+### Running the dbt Models
+
+To run the dbt models and build the data warehouse, follow these steps:
+
+1.  **Navigate to the dbt project directory:**
+    ```bash
+    cd warehouse
+    ```
+
+2.  **Run dbt:**
+    The dbt executable is located in the project's Python virtual environment (`.venv`). You can run the models using the following command. The `--profiles-dir .` flag tells dbt to look for the `profiles.yml` file in the current directory.
+    ```bash
+    ../.venv/bin/dbt run --profiles-dir .
+    ```
+
+    If you have the project's virtual environment activated in your shell, you can simply run:
+    ```bash
+    dbt run --profiles-dir .
+    ```
+
+---
+
+## 🧪 Coming Next
+
+- Airflow orchestration example  
 
 ---
 

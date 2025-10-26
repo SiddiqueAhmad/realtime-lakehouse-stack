@@ -1,0 +1,13 @@
+
+warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: http
+      host: localhost
+      port: 8080
+      user: trino
+      catalog: iceberg
+      schema: icebergdata
+      threads: 1

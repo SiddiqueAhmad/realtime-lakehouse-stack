@@ -6,7 +6,7 @@
     "bucket": "warehouse",
     "key-prefix": "icebergdata",
     "assume-role-arn": null,
-    "endpoint": "http://192.168.1.5:9000",
+    "endpoint": "http://minio:9000",
     "region": "us-east-1",
     "path-style-access": true,
     "flavor": "minio",

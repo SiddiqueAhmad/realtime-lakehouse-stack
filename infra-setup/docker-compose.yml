@@ -134,7 +134,7 @@ services:
       - AWS_REGION=us-east-1
     entrypoint: >
       /bin/sh -c "
-      until (/usr/bin/mc alias set minio http://192.168.1.5:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      until (/usr/bin/mc alias set minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
       /usr/bin/mc mb --ignore-existing minio/warehouse;
       /usr/bin/mc anonymous set public minio/warehouse;
       exit 0;
@@ -148,7 +148,7 @@ services:
       - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://testuser:testpass@db:5432/test
       - LAKEKEEPER__AUTHZ_BACKEND=allowall
       # Externally taken from environment variables if set
-      - LAKEKEEPER__BASE_URI=http://192.168.1.5:8181/
+      - LAKEKEEPER__BASE_URI=http://lakekeeper:8181/
       - LAKEKEEPER__AUTHZ_BACKEND=allowall
     command: [ "serve" ]
     healthcheck:
@@ -177,7 +177,7 @@ services:
       - "-X"
       - "POST"
       - "-v"
-      - "http://192.168.1.5:8181/management/v1/bootstrap"
+      - "http://lakekeeper:8181/management/v1/bootstrap"
       - "-H"
       - "Content-Type: application/json"
       - "--data"
@@ -204,7 +204,7 @@ services:
       - "-X"
       - "POST"
       - "-v"
-      - "http://192.168.1.5:8181/management/v1/warehouse"
+      - "http://lakekeeper:8181/management/v1/warehouse"
       - "-H"
       - "Content-Type: application/json"
       - "--data"
