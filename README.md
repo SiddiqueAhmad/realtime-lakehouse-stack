@@ -63,29 +63,32 @@ Once started:
 
 ---
 
-## 🤖 Data Transformation with dbt
+## 🤖 Data Transformation: From Raw Data to Business Insights with dbt
 
-This project uses dbt for SQL-based data transformation. The dbt project is located in the `warehouse` directory. We have implemented a Bronze-Silver-Gold Medallion Architecture for our data pipeline.
+This is where the raw data from our operational systems is transformed into clean, reliable, and business-ready datasets. We use dbt (Data Build Tool), the industry standard for data transformation, to build our Bronze, Silver, and Gold data layers.
+
+The dbt project is located in the `warehouse` directory and is pre-configured to connect to our Trino query engine, which reads from the Iceberg data lake.
 
 ### Running the dbt Models
 
-To run the dbt models and build the data warehouse, follow these steps:
+Follow these steps to run the transformations that build our `silver` and `gold` tables:
 
 1.  **Navigate to the dbt project directory:**
+    This is the heart of our transformation logic.
     ```bash
     cd warehouse
     ```
 
-2.  **Run dbt:**
-    The dbt executable is located in the project's Python virtual environment (`.venv`). You can run the models using the following command. The `--profiles-dir .` flag tells dbt to look for the `profiles.yml` file in the current directory.
+2.  **Run the dbt transformations:**
+    The following command executes all the dbt models. It uses the Python virtual environment (`.venv`) where dbt is installed and tells dbt to use the local `profiles.yml` for the Trino connection.
     ```bash
     ../.venv/bin/dbt run --profiles-dir .
     ```
+    You will see dbt connect to Trino and build the `enriched_orders` (Silver) and `daily_sales` (Gold) tables in your Iceberg data lake.
 
-    If you have the project's virtual environment activated in your shell, you can simply run:
-    ```bash
-    dbt run --profiles-dir .
-    ```
+    *Pro-tip: If you have the project's virtual environment activated in your shell (`source ../.venv/bin/activate`), you can simply run `dbt run --profiles-dir .`.*
+
+This process is the key to turning the real-time change data captured by Debezium into actionable insights in Metabase.
 
 ---
 
