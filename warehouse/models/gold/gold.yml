@@ -3,40 +3,61 @@ version: 2
 models:
   - name: data_quality_summary
     description: >
-      Observability rollup: pass/fail record counts per dataset per
-      pipeline run. No PHI-classified column.
+      Per-pipeline-run rollup: pass/fail record counts per dataset, per
+      pipeline_run_id (which run last merged each surviving row — see
+      macros/cdc_reliability.sql). Answers "how did a specific run's batch
+      look", not "how does the dataset look right now" — see
+      current_quality_summary for that. No PHI-classified column.
 
-  - name: quality_pass_rate
+  - name: current_quality_summary
     description: >
-      Overall PASS rate per dataset, rolled up across every run recorded
-      in data_quality_summary.
+      CURRENT-STATE PASS rate per dataset, computed directly from the live
+      silver views' present population (not by summing data_quality_summary
+      across runs — see that model's own docstring for why those aren't
+      interchangeable).
     columns:
       - name: dataset
         tests: [not_null, unique]
+      - name: current_row_count
+        tests: [not_null]
+      - name: current_pass_rate_pct
+        tests: [not_null]
 
   - name: cdc_freshness
     description: >
-      Freshness and CDC lag per dataset: how long between a source commit
-      and it landing in bronze (cdc_lag_seconds), and how long ago bronze
-      was last updated relative to now (staleness_seconds). See
-      macros/cdc_reliability.sql for cdc_source_ts_ns/_loaded_at.
+      Freshness and CDC lag per dataset, both measured from the SAME row
+      (the one with the latest _loaded_at) rather than independently-maxed
+      timestamps: cdc_lag_seconds is that row's own source-commit-to-load
+      latency; staleness_seconds is how long ago that same load happened,
+      relative to now. See macros/cdc_reliability.sql for
+      cdc_source_ts_ns/_loaded_at, and the model's own docstring for why
+      the two maxima can't just be subtracted from each other.
     columns:
       - name: dataset
         tests: [not_null, unique]
       - name: cdc_lag_seconds
         tests: [not_null]
+      - name: staleness_seconds
+        tests: [not_null]
 
   - name: cdc_volume_summary
     description: >
-      Raw CDC event volume vs. current bronze row count per dataset —
-      how many events the reliability engine's dedup/merge collapsed into
-      each row (events_per_current_row).
+      Raw CDC event volume per dataset, split into unique vs. duplicate
+      events (two-or-more raw log rows sharing the same natural key AND
+      LSN — a literal redelivery of the same event, not just "another
+      update to this key") and by operation type, against the current
+      bronze row count. See the model's own docstring for why a plain
+      raw-count-vs-row-count ratio doesn't actually measure duplication.
     columns:
       - name: dataset
         tests: [not_null, unique]
       - name: raw_event_count
         tests: [not_null]
-      - name: bronze_row_count
+      - name: unique_event_count
+        tests: [not_null]
+      - name: duplicate_event_count
+        tests: [not_null]
+      - name: current_row_count
         tests: [not_null]
 
   - name: daily_encounter_summary

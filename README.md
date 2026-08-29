@@ -101,14 +101,16 @@ Seeded as synthetic data in `infra-setup/timescale/healthcare.sql`.
 ## 📈 Observability
 
 Four gold models answer "is the pipeline healthy?" without exposing any
-PHI-classified column — counts, timestamps, and run ids only:
+PHI-classified column — counts, timestamps, and run ids only. Each has a
+precise, deliberately-not-interchangeable definition (see each model's own
+docstring for the reasoning):
 
 | Model | Answers |
 |---|---|
-| `gold.cdc_freshness` | How stale is each dataset right now, and how long does a change take to land in bronze (CDC lag)? |
-| `gold.cdc_volume_summary` | How many raw CDC events does the reliability engine collapse into each current-state row (dedup/redelivery ratio)? |
-| `gold.data_quality_summary` | Pass/fail record counts per dataset, per pipeline run. |
-| `gold.quality_pass_rate` | Overall PASS rate per dataset, rolled up across runs. |
+| `gold.cdc_freshness` | For the most-recently-processed event per dataset: how long did it take to land in bronze (`cdc_lag_seconds`), and how long ago was that (`staleness_seconds`)? Both measured from the same row, not two independently-maxed timestamps. |
+| `gold.cdc_volume_summary` | Raw CDC event volume split into unique vs. *duplicate* events (a literal redelivery — same natural key **and** LSN — not just "another update"), by operation type, against the current row count. |
+| `gold.data_quality_summary` | Pass/fail record counts per dataset, **per pipeline run** — how did a specific run's batch look. |
+| `gold.current_quality_summary` | PASS rate per dataset, **right now** — computed directly off the live silver population, not by summing across runs. |
 
 These read `pipeline_run_id`/`cdc_source_ts_ns`/`_loaded_at` — already
 computed once per row by the reliability engine (`macros/cdc_reliability.sql`)

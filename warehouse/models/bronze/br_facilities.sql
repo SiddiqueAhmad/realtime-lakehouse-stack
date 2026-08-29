@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as facility_id,
+    facility_id,
     name,
     npi,
     facility_type,

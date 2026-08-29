@@ -154,11 +154,11 @@ jobs:
           for i in $(seq 1 30); do
             patients_n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 1" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE patient_id = 1" \
                   2>/dev/null | tail -n1 || echo 0)
             encounters_n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE id = 2" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE encounter_id = 2" \
                   2>/dev/null | tail -n1 || echo 0)
             # 1 snapshot row + 2 UPDATE events each.
             if [ "${patients_n:-0}" -ge "3" ] 2>/dev/null && [ "${encounters_n:-0}" -ge "3" ] 2>/dev/null; then
@@ -223,7 +223,7 @@ jobs:
           for i in $(seq 1 30); do
             n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_diagnoses WHERE id = 3 AND __op = 'd'" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_diagnoses WHERE diagnosis_id = 3 AND __op = 'd'" \
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "1" ] 2>/dev/null; then
               echo "delete event landed"
@@ -390,21 +390,66 @@ jobs:
         working-directory: warehouse
         run: ../.venv/bin/dbt run --select gold --profiles-dir .
 
-      - name: Assert observability models were built with sane shape
+      - name: Assert observability models have sane shape AND correct values
+        # Row-count-only assertions ("9 rows exist") would pass even if
+        # every metric column were NULL or nonsensical — they prove the
+        # models were created, not that they're right. These check actual
+        # values, including some tied to specific scenarios already run
+        # above, so a regression in the metric logic itself gets caught.
         run: |
-          freshness_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.cdc_freshness" 2>/dev/null | tail -n1)
-          volume_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.cdc_volume_summary" 2>/dev/null | tail -n1)
-          passrate_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.quality_pass_rate" 2>/dev/null | tail -n1)
-          echo "cdc_freshness rows: $freshness_n, cdc_volume_summary rows: $volume_n, quality_pass_rate rows: $passrate_n"
-          ok=true
-          [ "${freshness_n:-0}" = "9" ]  || { echo "::error::cdc_freshness: expected 9 dataset rows (one per bronze entity), got $freshness_n"; ok=false; }
-          [ "${volume_n:-0}" = "9" ]     || { echo "::error::cdc_volume_summary: expected 9 dataset rows, got $volume_n"; ok=false; }
-          [ "${passrate_n:-0}" = "9" ]   || { echo "::error::quality_pass_rate: expected 9 dataset rows, got $passrate_n"; ok=false; }
-          [ "$ok" = "true" ] || exit 1
-          echo "Observability models built with the expected shape (9 datasets each)."
+          fail() { echo "::error::$1"; exit 1; }
+          lt100() { awk -v v="$1" 'BEGIN{ exit !(v + 0 < 100) }'; }
+
+          for tbl in gold.cdc_freshness gold.cdc_volume_summary gold.current_quality_summary; do
+            n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM $tbl" 2>/dev/null | tail -n1)
+            [ "${n:-0}" = "9" ] || fail "$tbl: expected 9 dataset rows (one per bronze entity), got $n"
+          done
+          echo "shape OK: cdc_freshness, cdc_volume_summary, current_quality_summary each have 9 dataset rows"
+
+          # cdc_freshness: lag/staleness must be non-negative for every
+          # dataset - a negative value means a clock or join bug, not a
+          # real reading.
+          bad_freshness=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.cdc_freshness WHERE cdc_lag_seconds < 0 OR staleness_seconds < 0" 2>/dev/null | tail -n1)
+          [ "${bad_freshness:-1}" = "0" ] || fail "cdc_freshness: $bad_freshness dataset(s) have negative lag/staleness"
+          echo "cdc_freshness OK: lag and staleness are non-negative for every dataset"
+
+          # cdc_volume_summary: raw events can never be fewer than current
+          # rows (every current row descends from at least one raw event).
+          # And scenario 01 (reliability-tests/01_duplicate_event.sql)
+          # redelivered patient_id=2's identical event at the same LSN
+          # twice, so patients must show at least 1 real duplicate.
+          bad_volume=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.cdc_volume_summary WHERE raw_event_count < current_row_count" 2>/dev/null | tail -n1)
+          [ "${bad_volume:-1}" = "0" ] || fail "cdc_volume_summary: $bad_volume dataset(s) have raw_event_count < current_row_count"
+          patients_dup=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT duplicate_event_count FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
+          [ "${patients_dup:-0}" -ge "1" ] 2>/dev/null || fail "cdc_volume_summary: expected patients.duplicate_event_count >= 1 (scenario 01's redelivery), got $patients_dup"
+          echo "cdc_volume_summary OK: raw >= current everywhere, and scenario 01's redelivery shows up as a real duplicate"
+
+          # current_quality_summary: pass rate must be a valid percentage
+          # everywhere, and diagnoses/lab_results specifically must be
+          # BELOW 100% - scenarios 05/06/07 put real FAIL rows into their
+          # current population.
+          bad_passrate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.current_quality_summary WHERE current_pass_rate_pct < 0 OR current_pass_rate_pct > 100" 2>/dev/null | tail -n1)
+          [ "${bad_passrate:-1}" = "0" ] || fail "current_quality_summary: $bad_passrate dataset(s) have an out-of-range pass rate"
+          diagnoses_rate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'diagnoses'" 2>/dev/null | tail -n1)
+          lab_rate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'lab_results'" 2>/dev/null | tail -n1)
+          lt100 "${diagnoses_rate:-100}" || fail "current_quality_summary: expected diagnoses pass rate < 100% (scenario 05's quarantined row), got $diagnoses_rate"
+          lt100 "${lab_rate:-100}"       || fail "current_quality_summary: expected lab_results pass rate < 100% (scenarios 06+07's quarantined rows), got $lab_rate"
+          echo "current_quality_summary OK: valid percentages, and the real quarantined rows from scenarios 05-07 show up"
+
+          echo "Observability models validated on actual values, not just row-count shape."
 
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a

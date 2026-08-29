@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as medication_id,
+    medication_id,
     patient_id,
     encounter_id,
     ndc_code,
