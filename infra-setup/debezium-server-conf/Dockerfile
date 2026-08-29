@@ -3,25 +3,43 @@
 # "io.debezium.DebeziumException: No Debezium consumer named 'jdbc' is
 # available"), contradicting an earlier assumption based on a web search
 # that conflated it with debezium-server-dist (see below). This installs
-# the actual full distribution - debezium-server-dist, published to Maven
-# Central as a tar.gz and confirmed (via search, not assumption this time)
-# to bundle every sink module, including jdbc - on top of the base image,
-# using the documented extraction pattern real Debezium Server Dockerfiles
-# use: `tar xzf dist.tar.gz -C $SERVER_HOME --strip-components 1`.
+# the full distribution - debezium-server-dist, published to Maven Central
+# as a tar.gz - on top of the base image, using the documented extraction
+# pattern real Debezium Server Dockerfiles use:
+# `tar xzf dist.tar.gz -C $SERVER_HOME --strip-components 1`.
 #
-# UNVERIFIED IN SANDBOX: this session has no route to Maven Central (same
-# disclosed constraint as everywhere else in this migration) so this
-# Dockerfile's build itself could not be run here. Prior iterations, each
-# grounded in the previous run's actual failure, not a fresh guess: a
-# guessed Maven coordinate that 404'd; assuming the stock image needed no
-# jars at all (wrong - "No Debezium consumer named 'jdbc'"); the tar
-# extraction itself failing on a missing gzip binary (this version's
-# `microdnf install -y gzip` fix). First real build + run happens in CI
+# Why 3.6.0.Final and not 3.0.8.Final: the "No consumer named 'jdbc'"
+# failure persisted even after installing debezium-server-dist correctly
+# (gzip fixed, extraction verified against a real run's logs). Root-caused
+# by fetching debezium-server-dist's own pom.xml at each version tag from
+# github.com/debezium/debezium-server and grep'ing it for "jdbc" - the
+# debezium-server-jdbc module (a formerly third-party sink, contributed by
+# the memiiso/debezium-server-jdbc community project) is NOT one of
+# debezium-server-dist's bundled dependencies until 3.6.0.Final; every
+# tag from 3.0.8.Final through 3.5.0.Final has no "jdbc" dependency in
+# that pom at all, so no extraction pattern could have made it available
+# on those versions - the tarball genuinely doesn't contain it.
+# 3.6.0.Final (released 2026-07-01, currently the latest stable Final -
+# 3.7 is still Alpha) is the first version confirmed, by direct inspection
+# of that tag's debezium-server-dist/pom.xml, to declare
+# `io.debezium:debezium-server-jdbc` as a compile-scope dependency.
+#
+# UNVERIFIED IN SANDBOX: this session has no route to Maven Central or
+# quay.io (same disclosed constraint as everywhere else in this
+# migration), so this Dockerfile's build itself could not be run here.
+# Prior iterations, each grounded in the previous run's actual failure,
+# not a fresh guess: a guessed Maven coordinate that 404'd; assuming the
+# stock image needed no jars at all (wrong - "No Debezium consumer named
+# 'jdbc'"); the tar extraction itself failing on a missing gzip binary
+# (fixed with `microdnf install -y gzip`); and, after both of those fixes,
+# the exact same "No consumer named 'jdbc'" error recurring on a real run
+# because 3.0.8.Final's debezium-server-dist simply never bundled a jdbc
+# sink (this version bump). First real build + run happens in CI
 # (.github/workflows/e2e-pipeline.yml).
-ARG DEBEZIUM_VERSION=3.0.8.Final
+ARG DEBEZIUM_VERSION=3.6.0.Final
 FROM quay.io/debezium/server:${DEBEZIUM_VERSION}
 
-ARG DEBEZIUM_VERSION=3.0.8.Final
+ARG DEBEZIUM_VERSION=3.6.0.Final
 
 USER root
 # Real run (33249165571): the download succeeded, but extraction failed -
