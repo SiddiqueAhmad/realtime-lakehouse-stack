@@ -60,6 +60,15 @@
 -- record_token must never share a fingerprint (see gold.yml's test), which
 -- is a directly checkable restatement of "this model never manufactures
 -- duplicate history for an unchanged decision."
+--
+-- previous_decision_fingerprint / previous_quality_status /
+-- previous_is_trusted / previous_is_quarantined / decision_transition:
+-- carry the prior logged decision (if any) onto the new row directly, so a
+-- state transition like "quarantined -> trusted" is a plain column read,
+-- not something every downstream query has to reconstruct with its own
+-- LAG()/self-join over this table. Null previous_* means this is the
+-- first decision ever logged for the record_token (matches the "(new)"
+-- case in decision_transition below), not a missing value.
 
 with current_state as (
 
@@ -77,6 +86,7 @@ last_logged as (
         is_trusted,
         is_quarantined,
         source_event_id,
+        decision_fingerprint,
         row_number() over (
             partition by record_token
             order by logged_at desc, pipeline_run_id desc
@@ -93,7 +103,12 @@ last_logged_current as (
 
 changed as (
 
-    select c.*
+    select
+        c.*,
+        l.quality_status       as previous_quality_status,
+        l.is_trusted           as previous_is_trusted,
+        l.is_quarantined       as previous_is_quarantined,
+        l.decision_fingerprint as previous_decision_fingerprint
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -110,10 +125,17 @@ changed as (
 -- against. Seed it with every record's current decision — this is the
 -- ledger's start-of-history point, not a reconstruction of decisions made
 -- before this model was added (those were never durably logged anywhere
--- and can't be recovered; see the limitation above).
+-- and can't be recovered; see the limitation above). No prior decision
+-- exists for any of these rows, so previous_* is null for all of them.
 changed as (
 
-    select * from current_state
+    select
+        c.*,
+        cast(null as varchar) as previous_quality_status,
+        cast(null as boolean) as previous_is_trusted,
+        cast(null as boolean) as previous_is_quarantined,
+        cast(null as varchar) as previous_decision_fingerprint
+    from current_state c
 
 )
 
@@ -131,6 +153,17 @@ select
         cast(is_trusted as varchar) || ':' ||
         cast(is_quarantined as varchar)
     ) as decision_fingerprint,
+    previous_decision_fingerprint,
+    -- Human-readable "what changed", read straight off the row instead of
+    -- reconstructed by joining this table to itself: "(new)" for a
+    -- record_token's first-ever logged decision, otherwise
+    -- "<prior status>/<trusted|quarantined> -> <new status>/<trusted|quarantined>".
+    coalesce(
+        previous_quality_status || '/' ||
+            (case when previous_is_trusted then 'trusted' else 'quarantined' end),
+        '(new)'
+    ) || ' -> ' || quality_status || '/' ||
+        (case when is_trusted then 'trusted' else 'quarantined' end) as decision_transition,
     source_event_id,
     pipeline_run_id,
     cdc_operation,

@@ -22,7 +22,14 @@
   `pipeline_run_id` and `_loaded_at`/lineage columns that are meant to change
   per run. Row counts, `quality_status`, and clinical values must be
   identical to step 2 — a plain re-run must be a no-op on the data.
-- This works because `cdc_reliable_select`'s merge is keyed by natural key,
-  and because DuckLake's transactional catalog + `incremental_strategy='merge'`
-  make the operation itself idempotent: re-merging the same rows converges
-  rather than duplicating or drifting.
+- This works because `cdc_reliable_select`'s dedup/ordering CTEs are keyed
+  by natural key, and because `incremental_strategy='delete+insert'`
+  (dbt-duckdb doesn't support `merge` — see macros/cdc_reliability.sql's own
+  comment) makes the operation itself idempotent: replaying the same rows by
+  key converges rather than duplicating or drifting.
+
+**Automated as:** the "scenario 10" steps in `.github/workflows/e2e-pipeline.yml`
+(near the end of the job) — snapshot `gold.cdc_volume_summary`'s per-entity
+row/event counts and `gold.record_lineage_event`'s row count, re-run
+`dbt run --profiles-dir .` with no new writes, and assert both are
+byte-for-byte unchanged.

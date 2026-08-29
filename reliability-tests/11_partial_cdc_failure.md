@@ -33,3 +33,11 @@ pipeline died mid-stream?
 - No row is silently missing. If a row from step 1 doesn't show up in
   `bronze.*` after Debezium fully catches up, that's a failure of this
   scenario, not an expected side effect of the kill.
+
+**Automated as:** the "scenario 11" steps in `.github/workflows/e2e-pipeline.yml`
+(near the end of the job) — a deterministic variant of the manual procedure
+above: kill Debezium first, write a new row directly to `ehr` while it's
+confirmed down (proving Postgres's own replication slot, not Debezium,
+is what retains the unconsumed WAL), restart it, and assert the row lands
+in `raw_cdc` exactly once and flows through to `bronze`/`quality`
+correctly — no gap, no duplicate delivery.

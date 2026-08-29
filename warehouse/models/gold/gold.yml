@@ -121,6 +121,22 @@ models:
         # for the actual retry-safety check this makes explicit: no two
         # consecutive rows for one record_token may share a fingerprint.
         tests: [not_null]
+      - name: previous_decision_fingerprint
+        # The prior row's decision_fingerprint for this record_token, or
+        # null for a record_token's first-ever logged decision. See
+        # tests/assert_record_lineage_event_previous_fingerprint_is_consistent.sql:
+        # this must always equal the immediately-preceding row's own
+        # decision_fingerprint (or be null iff there is no preceding row) -
+        # a directly checkable consistency guarantee, not just a
+        # convenience column that happens to look right.
+      - name: decision_transition
+        # Human-readable "<prior status>/<trusted|quarantined> ->
+        # <new status>/<trusted|quarantined>", or "(new) -> ..." for a
+        # record_token's first-ever logged decision. Exists so a state
+        # transition like quarantined -> trusted is a plain column read,
+        # not something every downstream query reconstructs with its own
+        # LAG()/self-join over this table.
+        tests: [not_null]
       - name: record_token
         tests: [not_null]
       - name: logged_at
