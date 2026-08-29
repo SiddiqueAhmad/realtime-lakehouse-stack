@@ -31,6 +31,5 @@ with_ranges as (
 select
     w.*,
     {{ dq_quality_status(checks) }} as quality_status,
-    {{ dq_failed_checks(checks) }} as failed_checks,
-    {{ lineage_columns('w.lab_result_id', 'w.cdc_source_ts_ns') }}
+    {{ dq_failed_checks(checks) }} as failed_checks
 from with_ranges w

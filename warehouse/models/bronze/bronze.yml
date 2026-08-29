@@ -9,8 +9,16 @@ models:
     columns:
       - name: patient_id
         tests: [unique, not_null]
-      - name: cdc_source_ts_ns
+      - name: cdc_source_lsn
+        description: >
+          Postgres WAL log sequence number the merged event was written at —
+          the deterministic ordering key (see macros/cdc_reliability.sql).
+          Strictly increasing per event, unlike cdc_source_ts_ns which is a
+          per-transaction commit timestamp and can repeat within one
+          transaction.
         tests: [not_null]
+      - name: record_token
+        tests: [unique, not_null]
 
   - name: br_providers
     columns:

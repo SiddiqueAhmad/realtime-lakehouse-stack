@@ -51,3 +51,23 @@ Each script's `-- EXPECTED` comment says what the reliability/quality layer
 should do. A scenario passes if the verification query returns that result —
 not if nothing breaks. A pipeline that silently drops or duplicates a row is
 a failure even if no error is raised.
+
+## What's actually automated in CI vs. what still needs the live stack
+
+`.github/workflows/ci.yml` runs on every PR and automates:
+
+- `dbt parse` over the whole warehouse project (Jinja/ref/source graph).
+- `infra-setup/trino/rules.json` JSON validity.
+- Scenarios 01, 03, 04, 06, 07 against a real Postgres 16 service container
+  with the actual `ehr` schema applied, plus `ci_assertions_postgres.sql`
+  asserting each one's expected source-side outcome.
+
+It does **not** automate the actual reliability/quality guarantees those
+scenarios exist to exercise — dedup, per-key ordering, the quarantine split,
+lineage token generation — because those are properties of the
+bronze/silver/quality dbt layers running against a live Debezium → Iceberg →
+Trino pipeline, which this workflow doesn't stand up. Nor does it cover
+scenarios 02, 05, 08 (need Trino) or the operational runbooks 10–12 (need
+the full `docker compose` stack). A docker-compose-based integration job
+that runs the whole suite end-to-end is tracked as follow-up work, not yet
+built.

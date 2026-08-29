@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  json-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate infra-setup/trino/rules.json is well-formed
+        run: python3 -m json.tool infra-setup/trino/rules.json > /dev/null
+
+  dbt-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: dbt parse (validates Jinja/ref/source graph — no live warehouse needed)
+        working-directory: warehouse
+        run: ../.venv/bin/dbt parse --profiles-dir .
+
+  postgres-reliability-scenarios:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: ehr
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d ehr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load synthetic EHR schema
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -f infra-setup/timescale/healthcare.sql
+      - name: Run Postgres-based reliability scenarios (01, 03, 04, 06, 07)
+        run: |
+          for f in reliability-tests/01_duplicate_patient_event.sql \
+                   reliability-tests/03_duplicate_encounter.sql \
+                   reliability-tests/04_deleted_diagnosis.sql \
+                   reliability-tests/06_impossible_lab_value.sql \
+                   reliability-tests/07_missing_required_field.sql; do
+            echo "=== $f ==="
+            PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Assert scenario outcomes at the source
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -f reliability-tests/ci_assertions_postgres.sql
+
+  # NOTE: this does not yet cover the Trino-based scenarios (02, 05, 08) or
+  # the bronze/silver/quality reliability guarantees (dedup, ordering,
+  # quarantine) those Postgres-side scenarios feed into — those need the
+  # full Debezium/Iceberg/Trino stack via `docker compose up`, which isn't
+  # run in this workflow. Tracked as follow-up: a docker-compose-based
+  # integration job. See reliability-tests/README.md.

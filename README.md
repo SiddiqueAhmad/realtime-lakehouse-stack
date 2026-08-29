@@ -105,11 +105,18 @@ Seeded as synthetic data in `infra-setup/timescale/healthcare.sql`.
   role → access matrix (`data_engineer`, `analyst`, `clinical_user`,
   `ai_agent`).
 - [`infra-setup/trino/rules.json`](infra-setup/trino/rules.json) — Trino
-  file-based access control implementing that matrix (opt-in; see
-  `infra-setup/trino/access-control.properties.example`).
+  file-based access control implementing that matrix.
+  **⚠️ Not enabled by default.** `docker compose up` runs Trino wide open —
+  the rules only take effect once you copy
+  `infra-setup/trino/access-control.properties.example` to
+  `access-control.properties` and restart Trino (see that file's header).
+  Until you do, minimum-necessary access is a policy this repo *can*
+  enforce, not one the running stack *is* enforcing.
 - Lineage/observability metadata (`record_token`, `source_event_id`,
-  `pipeline_run_id`) is deliberately non-reversible and carries no PHI
-  values — see `warehouse/macros/lineage.sql` and the "lineage safety
+  `pipeline_run_id`) is HMAC-keyed (not a plain hash — see
+  `docs/lineage_token_rotation.md` for why that matters and how to set
+  `RECORD_TOKEN_HMAC_KEY`) and carries no PHI values — see
+  `warehouse/macros/lineage.sql` and the "lineage safety
   rules" in the PHI registry.
 
 ## 🧪 Reliability test suite
@@ -122,6 +129,13 @@ recovery — against the questions this platform needs to answer:
 > Did we preserve the correct clinical state? Can we prove where it came
 > from? Can we prove which quality checks it passed? Can we identify who
 > accessed it? Can we replay the pipeline safely?
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `dbt parse`, JSON
+validation, and 5 of the 12 scenarios against a real Postgres service
+container on every PR — see "What's actually automated in CI" in
+`reliability-tests/README.md` for exactly what that does and doesn't cover
+(the bronze/silver/quality reliability guarantees themselves still need the
+live Debezium/Iceberg/Trino stack, which CI doesn't stand up yet).
 
 ---
 

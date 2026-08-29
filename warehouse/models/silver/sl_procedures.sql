@@ -18,6 +18,5 @@ with base as (
 select
     b.*,
     {{ dq_quality_status(checks) }} as quality_status,
-    {{ dq_failed_checks(checks) }} as failed_checks,
-    {{ lineage_columns('b.procedure_id', 'b.cdc_source_ts_ns') }}
+    {{ dq_failed_checks(checks) }} as failed_checks
 from base b
