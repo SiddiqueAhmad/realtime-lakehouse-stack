@@ -116,6 +116,32 @@ These read `pipeline_run_id`/`cdc_source_ts_ns`/`_loaded_at` — already
 computed once per row by the reliability engine (`macros/cdc_reliability.sql`)
 — rather than adding a separate metrics-collection mechanism.
 
+### Operational lineage: "why is this record in the state it's in?"
+
+`gold.record_lineage` traces one record's whole journey — CDC event →
+processing run → quality decision → trusted/quarantine — for the 4 fully
+quality-gated entities (patients, encounters, diagnoses, lab_results):
+
+```
+Patient record
+     │
+CDC event (source_event_id: which transaction/LSN produced this version)
+     │
+Processing (pipeline_run_id: which dbt run merged it into bronze)
+     │
+Quality decision (quality_status / failed_checks)
+     │
+ ┌───┴────┐
+ ▼        ▼
+trusted quarantine   (or neither, if deleted before a decision was made)
+```
+
+Keyed on `record_token`, not the natural key — PHI-free, so an analyst or
+an AI agent can investigate *why* a record was quarantined without
+touching a clinical value, escalating to a `clinical_user`/`data_engineer`
+(who can resolve `record_token` back to the underlying row under their own
+tier's access) only if the investigation actually needs the PHI itself.
+
 ## 🔐 Governance & PHI
 
 - [`governance/phi_classification.yml`](governance/phi_classification.yml) —

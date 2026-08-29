@@ -74,3 +74,13 @@ rather than being a hard cutover:
   `record_token`'s formula is unchanged (natural key only); it was rev'd to
   v2 alongside `source_event_id` purely because the truncation length
   changed, which likewise makes old and new tokens incomparable.
+- **v2 → v3**: `record_token`'s formula now includes the source table, not
+  just the natural key. Every entity here uses small sequential integer
+  keys starting near 1, so `patient_id=1` and `encounter_id=1` exist at the
+  same time — without the table in the hash input, they produced the SAME
+  token. That was invisible as long as every consumer only ever joined
+  `record_token` back within one entity's own bronze/silver/quarantine
+  chain, and stopped being invisible the moment something correlates
+  `record_token` *across* entities — which is exactly what
+  `models/gold/record_lineage.sql` (added in the same change) does. Found
+  while building that model, not by a review catching it first.
