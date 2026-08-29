@@ -429,7 +429,15 @@ jobs:
             --output-format CSV_UNQUOTED --execute \
             "SELECT duplicate_event_count FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
           [ "${patients_dup:-0}" -ge "1" ] 2>/dev/null || fail "cdc_volume_summary: expected patients.duplicate_event_count >= 1 (scenario 01's redelivery), got $patients_dup"
-          echo "cdc_volume_summary OK: raw >= current everywhere, and scenario 01's redelivery shows up as a real duplicate"
+          # The four rates are defined to sum to ~100% (see the model's own
+          # docstring) - verify that's actually true for one real row,
+          # rather than just trusting the arithmetic by inspection.
+          patients_rate_sum=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT duplicate_rate_pct + insert_rate_pct + update_rate_pct + delete_rate_pct FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
+          awk -v v="${patients_rate_sum:-0}" 'BEGIN{ if (v < 99.5 || v > 100.5) exit 1 }' \
+            || fail "cdc_volume_summary: expected the 4 rate columns to sum to ~100% for patients, got $patients_rate_sum"
+          echo "cdc_volume_summary OK: raw >= current everywhere, scenario 01's redelivery shows up as a real duplicate, and the 4 rates sum to ~100%"
 
           # current_quality_summary: pass rate must be a valid percentage
           # everywhere, and diagnoses/lab_results specifically must be

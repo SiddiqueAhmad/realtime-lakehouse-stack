@@ -108,7 +108,7 @@ docstring for the reasoning):
 | Model | Answers |
 |---|---|
 | `gold.cdc_freshness` | For the most-recently-processed event per dataset: how long did it take to land in bronze (`cdc_lag_seconds`), and how long ago was that (`staleness_seconds`)? Both measured from the same row, not two independently-maxed timestamps. |
-| `gold.cdc_volume_summary` | Raw CDC event volume split into unique vs. *duplicate* events (a literal redelivery — same natural key **and** LSN — not just "another update"), by operation type, against the current row count. |
+| `gold.cdc_volume_summary` | Raw CDC event volume split into unique vs. *duplicate* events (a literal redelivery — same natural key **and** LSN — not just "another update"), by operation type, against the current row count, plus each as a rate (`duplicate_rate_pct`/`insert_rate_pct`/`update_rate_pct`/`delete_rate_pct`, summing to ~100%). |
 | `gold.data_quality_summary` | Pass/fail record counts per dataset, **per pipeline run** — how did a specific run's batch look. |
 | `gold.current_quality_summary` | PASS rate per dataset, **right now** — computed directly off the live silver population, not by summing across runs. |
 

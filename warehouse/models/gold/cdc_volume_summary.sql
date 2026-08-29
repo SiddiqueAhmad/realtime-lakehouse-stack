@@ -92,10 +92,18 @@ select
     r.raw_event_count,
     r.unique_event_count,
     r.duplicate_event_count,
-    round(100.0 * r.duplicate_event_count / nullif(r.raw_event_count, 0), 2) as duplicate_rate_pct,
     r.insert_event_count,
     r.update_event_count,
     r.delete_event_count,
+    -- Rates, all as a percentage of raw_event_count. These four sum to
+    -- ~100% by construction: every raw event is either a duplicate
+    -- delivery, or the (exactly one) insert/update/delete event it
+    -- duplicates — raw_event_count = unique_event_count + duplicate_event_count,
+    -- and unique_event_count = insert + update + delete counts.
+    round(100.0 * r.duplicate_event_count / nullif(r.raw_event_count, 0), 2) as duplicate_rate_pct,
+    round(100.0 * r.insert_event_count    / nullif(r.raw_event_count, 0), 2) as insert_rate_pct,
+    round(100.0 * r.update_event_count    / nullif(r.raw_event_count, 0), 2) as update_rate_pct,
+    round(100.0 * r.delete_event_count    / nullif(r.raw_event_count, 0), 2) as delete_rate_pct,
     b.current_row_count,
     b.bronze_deleted_count
 from raw_stats r

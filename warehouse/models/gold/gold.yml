@@ -46,8 +46,11 @@ models:
       events (two-or-more raw log rows sharing the same natural key AND
       LSN — a literal redelivery of the same event, not just "another
       update to this key") and by operation type, against the current
-      bronze row count. See the model's own docstring for why a plain
-      raw-count-vs-row-count ratio doesn't actually measure duplication.
+      bronze row count, plus each of those as a rate (percentage of
+      raw_event_count) — duplicate_rate_pct, insert_rate_pct,
+      update_rate_pct, delete_rate_pct sum to ~100% by construction. See
+      the model's own docstring for why a plain raw-count-vs-row-count
+      ratio doesn't actually measure duplication.
     columns:
       - name: dataset
         tests: [not_null, unique]
