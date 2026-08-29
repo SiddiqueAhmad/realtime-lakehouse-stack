@@ -109,8 +109,18 @@ models:
       - name: ledger_key
         # record_token || ':' || pipeline_run_id. Unique because record_lineage
         # (this model's source) has at most one row per record_token per run,
-        # and pipeline_run_id is one value per dbt invocation.
+        # and pipeline_run_id is one value per dbt invocation. This is a
+        # traceability label (which run observed the change), not what
+        # enforces retry-safety - see decision_fingerprint for that.
         tests: [not_null, unique]
+      - name: decision_fingerprint
+        # sha256 of the fields the model's own change-detection compares on
+        # (record_token/source_event_id/quality_status/failed_checks/
+        # is_trusted/is_quarantined). See
+        # tests/assert_record_lineage_event_never_duplicates_a_decision.sql
+        # for the actual retry-safety check this makes explicit: no two
+        # consecutive rows for one record_token may share a fingerprint.
+        tests: [not_null]
       - name: record_token
         tests: [not_null]
       - name: logged_at

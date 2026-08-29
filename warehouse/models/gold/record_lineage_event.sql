@@ -48,6 +48,18 @@
 -- Deliberately PHI-free, same as record_lineage: only record_token and
 -- operational/lineage metadata, safe for the same broad access tier as the
 -- other gold observability models.
+--
+-- decision_fingerprint: a deterministic hash of exactly the fields the
+-- `changed` comparison below keys on (record_token, source_event_id,
+-- quality_status, failed_checks, is_trusted, is_quarantined). This is not
+-- what enforces retry-safety - the `changed` CTE's own IS DISTINCT FROM
+-- comparisons do that, independent of pipeline_run_id, so a retry that
+-- recomputes an identical decision is already a no-op here. What
+-- decision_fingerprint adds is making that invariant visible and testable
+-- without having to trace the CTE logic: two consecutive rows for the same
+-- record_token must never share a fingerprint (see gold.yml's test), which
+-- is a directly checkable restatement of "this model never manufactures
+-- duplicate history for an unchanged decision."
 
 with current_state as (
 
@@ -111,6 +123,14 @@ select
     dataset,
     record_token,
     record_token || ':' || pipeline_run_id as ledger_key,
+    sha256(
+        record_token || ':' ||
+        coalesce(source_event_id, '') || ':' ||
+        quality_status || ':' ||
+        coalesce(failed_checks, '') || ':' ||
+        cast(is_trusted as varchar) || ':' ||
+        cast(is_quarantined as varchar)
+    ) as decision_fingerprint,
     source_event_id,
     pipeline_run_id,
     cdc_operation,
