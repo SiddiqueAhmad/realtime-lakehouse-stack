@@ -497,6 +497,32 @@ jobs:
           [ "${n:-0}" = "1" ] || fail "record_lineage_event: expected exactly 1 logged FAIL/quarantined entry for scenario 05's record, got $n"
           echo "record_lineage_event OK: scenario 05's quarantine decision is logged."
 
+      - name: Assert record_lineage_event logged scenario 04's deletion
+        # Direct proof for the DELETED quality_status path (see
+        # record_lineage_event.sql's own comment): scenario 04's diagnosis
+        # is deleted, so record_lineage's quality_status for it is null by
+        # design - this asserts record_lineage_event still logs a real,
+        # well-defined decision for it rather than silently producing a
+        # null-fingerprinted row (which is what the "Re-run the full test
+        # suite" step's not_null tests would catch anyway, but this pins
+        # down the actual expected value, not just "it's not null").
+        # diagnosis_id=3 is seed data, not inserted by this scenario - it
+        # already had a logged decision (whatever the seed run computed)
+        # before the delete, so decision_transition's PRIOR half isn't
+        # pinned down here, only that it correctly ends at DELETED.
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          record_token=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 3" 2>/dev/null | tail -n1)
+          [ -n "$record_token" ] || fail "record_lineage_event: could not resolve scenario 04's record_token"
+          row=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT quality_status, decision_transition, (decision_fingerprint IS NOT NULL) FROM gold.record_lineage_event WHERE record_token = '$record_token' AND quality_status = 'DELETED'" 2>/dev/null | tail -n1)
+          case "$row" in
+            "DELETED,"*"-> DELETED,true") ;;
+            *) fail "record_lineage_event: expected a DELETED row ending 'decision_transition ... -> DELETED' with a non-null fingerprint for scenario 04's deleted record, got: $row" ;;
+          esac
+          echo "record_lineage_event OK: scenario 04's deletion is logged as a well-defined DELETED decision, not a null fingerprint. ($row)"
+
       - name: Run scenario 13 (corrected referential integrity) against raw_cdc
         run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 -f reliability-tests/13_quarantine_correction.sql
 

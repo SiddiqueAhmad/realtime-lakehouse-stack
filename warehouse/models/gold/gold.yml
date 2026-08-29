@@ -104,7 +104,11 @@ models:
       a record's decision actually changes from the last one logged for it,
       not on every run. See the model's own docstring, including its
       documented limitation (one entry per dbt run in which a decision
-      changed, not one per underlying CDC event).
+      changed, not one per underlying CDC event). quality_status here is
+      'DELETED' (never null) for a record whose current bronze row is a
+      delete tombstone, distinct from record_lineage's own quality_status
+      for the same record_token, which is null in that case - see the
+      model's own docstring for why the two intentionally diverge.
     columns:
       - name: ledger_key
         # record_token || ':' || event_sequence. Previously built from

@@ -88,9 +88,28 @@
 -- this model's own counter, incremented once per row this model itself
 -- appends for a given record_token, independent of what bronze or the
 -- clock are doing.
+--
+-- DELETED as a quality_status value: record_lineage deliberately leaves
+-- quality_status null for a record whose current bronze row is a delete
+-- tombstone (its own docstring: "or neither, if the record was deleted
+-- before ever reaching a quality decision") - sl_* is a view filtered to
+-- `where not is_deleted`, so a deleted record simply has no row there to
+-- join against, for any record's delete, not just a pre-decision one.
+-- That's the right current-state answer for record_lineage (there IS no
+-- live quality decision for a deleted record), but it's the wrong answer
+-- here: decision_fingerprint/decision_transition need a real value to
+-- hash and print, and a delete is itself a legitimate, auditable decision
+-- to log - arguably the most important one scenario 4 exists to prove
+-- ("delete handling / auditability"), not a gap to route around. So this
+-- model remaps null-because-deleted to the literal status 'DELETED' right
+-- at the source (current_state), rather than threading a null-check
+-- through every place quality_status gets used below.
 with current_state as (
 
-    select * from {{ ref('record_lineage') }}
+    select
+        * exclude (quality_status),
+        case when is_deleted then 'DELETED' else quality_status end as quality_status
+    from {{ ref('record_lineage') }}
 
 ),
 
@@ -183,12 +202,24 @@ select
     -- reconstructed by joining this table to itself: "(new)" for a
     -- record_token's first-ever logged decision, otherwise
     -- "<prior status>/<trusted|quarantined> -> <new status>/<trusted|quarantined>".
+    -- DELETED is printed bare (no "/trusted"|"/quarantined" suffix) -
+    -- is_trusted/is_quarantined are just false/false for a deleted record
+    -- (nothing to be trusted or quarantined), so appending either word
+    -- would misleadingly imply a quality-gate outcome that was never
+    -- computed.
     coalesce(
-        previous_quality_status || '/' ||
-            (case when previous_is_trusted then 'trusted' else 'quarantined' end),
+        case
+            when previous_quality_status = 'DELETED' then 'DELETED'
+            when previous_quality_status is not null then
+                previous_quality_status || '/' ||
+                    (case when previous_is_trusted then 'trusted' else 'quarantined' end)
+        end,
         '(new)'
-    ) || ' -> ' || quality_status || '/' ||
-        (case when is_trusted then 'trusted' else 'quarantined' end) as decision_transition,
+    ) || ' -> ' ||
+        case
+            when quality_status = 'DELETED' then 'DELETED'
+            else quality_status || '/' || (case when is_trusted then 'trusted' else 'quarantined' end)
+        end as decision_transition,
     source_event_id,
     pipeline_run_id,
     cdc_operation,
