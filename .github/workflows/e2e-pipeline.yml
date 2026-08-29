@@ -14,6 +14,13 @@ name: E2E pipeline reliability (best-effort)
 # authored it (no Docker daemon available there — see reliability-tests/README.md);
 # treat its first few real runs as shakeout, not as already-proven, and
 # promote it to a required PR check once it's demonstrated stable.
+#
+# No production secret of any kind is used here: RECORD_TOKEN_HMAC_KEY is
+# generated fresh per run (openssl rand), and every other credential is the
+# synthetic stack's own hardcoded dev value (testuser/testpass, MinIO
+# admin/password, ...), matching infra-setup/docker-compose.yml. On failure,
+# every service's logs (plus dbt's own log) are uploaded as a build
+# artifact rather than left to scroll off the console.
 
 on:
   workflow_dispatch:
@@ -38,6 +45,14 @@ jobs:
             https://repo1.maven.org/maven2/io/trino/trino-cli/442/trino-cli-442-executable.jar
           chmod +x /usr/local/bin/trino
 
+      - name: Generate a CI-only lineage HMAC key
+        # Real RECORD_TOKEN_HMAC_KEY, generated fresh per run and never
+        # logged or persisted — not the insecure dev fallback documented in
+        # warehouse/macros/lineage.sql. Written to $GITHUB_ENV so every
+        # later step (dbt run, dbt test) picks it up automatically. No
+        # production secret of any kind is used anywhere in this workflow.
+        run: echo "RECORD_TOKEN_HMAC_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Enable minimum-necessary access control (scenario 08)
         # Turning this on from the start (rather than isolating it to the
         # scenario 08 step) is safe for scenarios 01-07: every query in this
@@ -53,6 +68,19 @@ jobs:
       - name: Start the stack
         working-directory: infra-setup
         run: docker compose up -d
+
+      - name: Wait for Postgres to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if PGPASSWORD=testpass pg_isready -h localhost -p 5433 -U testuser -d ehr > /dev/null 2>&1; then
+              echo "Postgres is up"
+              exit 0
+            fi
+            echo "waiting for Postgres... ($i/30)"
+            sleep 3
+          done
+          echo "::error::Postgres did not become ready in time"
+          exit 1
 
       - name: Wait for Trino to accept queries
         run: |
@@ -378,10 +406,28 @@ jobs:
           [ "$ok" = "true" ] || exit 1
           echo "Observability models built with the expected shape (9 datasets each)."
 
-      - name: Dump service logs on failure
+      - name: Collect diagnostics on failure
+        # A bare "job failed" with no logs is useless for triaging a
+        # multi-service pipeline. Every service's log, plus dbt's own log,
+        # goes to an uploaded artifact — not just workflow console output,
+        # which is easy to miss and gets truncated.
         if: failure()
-        working-directory: infra-setup
-        run: docker compose logs --tail=200
+        run: |
+          mkdir -p artifacts
+          ( cd infra-setup && docker compose logs --no-color ) > artifacts/docker-compose-all.log 2>&1 || true
+          for svc in db debezium-iceberg trino lakekeeper minio metabase; do
+            ( cd infra-setup && docker compose logs --no-color "$svc" ) > "artifacts/${svc}.log" 2>&1 || true
+          done
+          cp warehouse/logs/dbt.log artifacts/dbt.log 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Tear down
         if: always()
