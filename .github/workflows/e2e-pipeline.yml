@@ -537,6 +537,114 @@ jobs:
           esac
           echo "record_lineage_event OK: the incident timeline record_lineage alone can't show - quarantine, then correction, then trusted - is intact."
 
+          # decision_transition/previous_decision_fingerprint exist so this
+          # exact "what changed" question is a plain column read on the
+          # PASS/trusted row, not a self-join a caller has to write - assert
+          # that's actually true for scenario 13's own correction, not just
+          # for a scratch fixture.
+          transition=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT decision_transition FROM gold.record_lineage_event WHERE record_token = '$record_token' AND quality_status = 'PASS'" 2>/dev/null | tail -n1)
+          [ "$transition" = "FAIL/quarantined -> PASS/trusted" ] || fail "record_lineage_event: expected decision_transition 'FAIL/quarantined -> PASS/trusted' for the corrected record, got: $transition"
+
+          fp_check=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM gold.record_lineage_event q WHERE q.record_token = '$record_token' AND q.quality_status = 'PASS' AND q.previous_decision_fingerprint = (SELECT decision_fingerprint FROM gold.record_lineage_event WHERE record_token = '$record_token' AND quality_status = 'FAIL')" 2>/dev/null | tail -n1)
+          [ "${fp_check:-0}" = "1" ] || fail "record_lineage_event: expected the PASS row's previous_decision_fingerprint to equal the FAIL row's own decision_fingerprint, got count=$fp_check"
+          echo "record_lineage_event OK: decision_transition and previous_decision_fingerprint correctly read the quarantine -> trusted correction off a single row."
+
+      - name: Capture scenario 10's pre-replay snapshot (pipeline replay)
+        # reliability-tests/10_pipeline_replay.md, automated: a plain re-run
+        # of dbt with no new source writes must be a no-op on the data.
+        # gold.cdc_volume_summary already carries one row per bronze entity
+        # with raw_event_count/current_row_count - a single string_agg over
+        # it is exactly runbook 10's "record row counts... across bronze"
+        # step, for all 9 entities at once rather than just one table.
+        run: |
+          snapshot=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT string_agg(dataset || ':' || raw_event_count || ':' || current_row_count, ',' ORDER BY dataset) FROM gold.cdc_volume_summary" \
+            2>/dev/null | tail -n1)
+          echo "$snapshot" > /tmp/scenario10_volume_snapshot.txt
+          lineage_count=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM gold.record_lineage_event" 2>/dev/null | tail -n1)
+          echo "$lineage_count" > /tmp/scenario10_lineage_count.txt
+          echo "Captured pre-replay snapshot (record_lineage_event count=$lineage_count): $snapshot"
+
+      - name: Re-run the full pipeline with no new source writes (scenario 10 replay)
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --profiles-dir .
+
+      - name: Assert scenario 10's outcome - a plain replay is a no-op on the data
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          snapshot_before=$(cat /tmp/scenario10_volume_snapshot.txt)
+          snapshot_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT string_agg(dataset || ':' || raw_event_count || ':' || current_row_count, ',' ORDER BY dataset) FROM gold.cdc_volume_summary" \
+            2>/dev/null | tail -n1)
+          [ "$snapshot_after" = "$snapshot_before" ] || fail "scenario 10: bronze row/event counts changed on a no-op replay. Before: $snapshot_before After: $snapshot_after"
+
+          lineage_before=$(cat /tmp/scenario10_lineage_count.txt)
+          lineage_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM gold.record_lineage_event" 2>/dev/null | tail -n1)
+          [ "$lineage_after" = "$lineage_before" ] || fail "scenario 10: record_lineage_event grew on a no-op replay (before=$lineage_before after=$lineage_after) - a re-run with no source changes must not manufacture new decision history."
+          echo "Scenario 10 passed: dbt run with no new source writes is a true no-op on bronze row/event counts and lineage history."
+
+      - name: Kill Debezium, then write a new diagnosis while it's down (scenario 11 setup)
+        # reliability-tests/11_partial_cdc_failure.md, automated: rather than
+        # racing a mid-flight kill (nondeterministic - Debezium may or may
+        # not have already streamed the event by the time the kill lands),
+        # kill it FIRST and write the new row while it's confirmed down.
+        # That's a strictly harder, fully deterministic version of the same
+        # claim: Postgres's logical replication slot (not Debezium) is what
+        # retains unconsumed WAL, so the event must still be there,
+        # untouched, whenever Debezium comes back - proving durability
+        # doesn't depend on Debezium being up continuously.
+        working-directory: infra-setup
+        run: |
+          docker kill debezium
+          docker compose ps -a debezium
+          PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO ehr.diagnoses (diagnosis_id, encounter_id, patient_id, icd10_code, description, diagnosed_at) VALUES (9003, 1, 1, 'M25.50', 'Pain in unspecified joint', now())"
+          echo "Diagnosis 9003 written while debezium is down."
+
+      - name: Restart Debezium (scenario 11 recovery)
+        working-directory: infra-setup
+        run: docker compose up -d debezium
+
+      - name: Wait for the new diagnosis's CDC event to land after restart
+        run: |
+          for i in $(seq 1 30); do
+            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.diagnoses WHERE diagnosis_id = 9003" \
+                  2>/dev/null | tail -n1 || echo 0)
+            if [ "${n:-0}" -ge "1" ] 2>/dev/null; then
+              echo "diagnosis 9003 landed after restart ($n row(s))"
+              exit 0
+            fi
+            echo "waiting for Debezium to resume and stream diagnosis 9003... ($i/30)"
+            sleep 5
+          done
+          echo "::error::Timed out waiting for scenario 11's post-restart CDC event to land"
+          exit 1
+
+      - name: Re-run bronze/silver/quality for diagnoses (scenario 11)
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --select br_diagnoses sl_diagnoses trusted_diagnoses quarantine_diagnoses --profiles-dir .
+
+      - name: Assert scenario 11's outcome - resumed with no gap and no duplication
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          raw_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM raw.raw_cdc.diagnoses WHERE diagnosis_id = 9003" 2>/dev/null | tail -n1)
+          [ "${raw_n:-0}" = "1" ] || fail "scenario 11: expected exactly 1 raw_cdc event for diagnosis 9003 after the kill/restart (no gap, no duplicate delivery), got $raw_n"
+
+          bronze_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*), icd10_code FROM bronze.br_diagnoses WHERE diagnosis_id = 9003 GROUP BY icd10_code" 2>/dev/null | tail -n1)
+          [ "$bronze_result" = "1,M25.50" ] || fail "scenario 11: expected bronze.br_diagnoses to show exactly 1 row with icd10_code=M25.50 for diagnosis 9003, got: $bronze_result"
+
+          trusted_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM quality.trusted_diagnoses WHERE diagnosis_id = 9003" 2>/dev/null | tail -n1)
+          [ "${trusted_n:-0}" = "1" ] || fail "scenario 11: expected diagnosis 9003 (a valid reference) in trusted_diagnoses, got count=$trusted_n"
+          echo "Scenario 11 passed: Debezium resumed from its committed offset after being killed and restarted - the event written while it was down landed exactly once, with no gap and no duplication."
+
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
         # multi-service pipeline. Every service's log, plus dbt's own log,

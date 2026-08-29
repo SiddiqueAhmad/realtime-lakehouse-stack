@@ -151,16 +151,54 @@ JVM query server, no separate object-store service, no REST catalog service
    operational EHR Postgres connection now, not a warehouse one. Querying
    `gold.*`/`deid.*` today means running `infra-setup/scripts/dq.py`
    directly (see "Quick Start" below) or `dbt show`.
+3. **DuckLake writes are serialized (`threads: 1`), not concurrent.**
+   Concurrent writes from multiple threads to the same DuckLake catalog are
+   a confirmed, currently-open upstream limitation
+   (`duckdb/ducklake#233`) — a real run of this pipeline segfaulted the one
+   time it exercised concurrent DuckLake writes. `warehouse/profiles.yml`
+   pins `threads: 1` to avoid that entirely. Treat this deployment as a
+   single serialized writer with multiple readers, not a generally
+   concurrency-safe warehouse; revisit once that upstream issue is fixed.
 
-**Validation note:** this migration's network egress policy blocked Docker
-image pulls (the new Debezium+JDBC-sink image) and DuckDB's own extension
-repository (`ducklake`, `postgres`) where it was written — the actual
-JDBC-sink → `raw_cdc` table shape and the `ducklake:` attach syntax could
-not be exercised end-to-end there. `dbt parse`/`dbt compile` against a real
-`dbt-duckdb` install, and every SQL function used, were checked directly;
-what couldn't be checked locally was validated via
-`.github/workflows/e2e-pipeline.yml` on a real GitHub Actions runner
-instead. See that workflow's own header comment for specifics.
+**`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
+it is Debezium's append-only landing log, and the *only* copy of the raw CDC
+event stream this stack keeps — there is no separate durable archive of it.
+Concretely:
+
+- It survives a container **restart** (`docker compose stop` / `start`, or a
+  crash): the data lives in Postgres's own data directory, and Debezium's
+  offsets/schema-history live in the `debezium-data` named volume (see
+  `infra-setup/docker-compose.yml`) — both outlive the containers built on
+  top of them.
+- It does **not** survive `docker compose down -v`: that deletes the named
+  volumes, taking the Postgres data directory and Debezium's offsets/schema
+  history with it. The next `up` starts a fresh snapshot from the OLTP
+  source, not a replay of prior history.
+- It is not independently backed up. Nothing in this stack copies
+  `raw_cdc` anywhere else, so its durability is exactly Postgres's own
+  (single instance, no replica, no external backup) — a landing buffer and
+  replay source for this pipeline, not an audit archive with its own
+  retention guarantee.
+
+For local dev/CI this is the right tradeoff (fast, disposable, matches
+`docker compose down -v && up` being a supported reset path — see
+scenarios 10–12 below). A deployment that needs `raw_cdc` to be a durable
+audit trail in its own right — independent of the OLTP source's own
+retention — would need to add real backup/replication in front of it; this
+repo does not attempt that.
+
+**Validation note:** every migration claim above was verified against a
+real, fully green run of `.github/workflows/e2e-pipeline.yml` on GitHub
+Actions — all 13 reliability scenarios, `dbt seed`/`run`/`test` (34 models,
+59 tests), and the gold rebuild all pass end-to-end against the real
+Debezium → `raw_cdc` → DuckDB/DuckLake pipeline. Getting there took nine
+real, evidence-grounded fixes (a Debezium Server version too old to bundle
+its own JDBC sink, a Quarkus config-escaping crash, an unfiltered internal
+Debezium topic reaching the sink, a missing Python dependency, a broken
+DuckLake catalog name, an unsupported dbt incremental strategy, a
+boolean-formatting mismatch, and two confirmed upstream DuckLake bugs —
+`duckdb/ducklake#509` and `#233` above) — see that workflow's own commit
+history for the specifics of each.
 
 ## 📈 Observability
 
