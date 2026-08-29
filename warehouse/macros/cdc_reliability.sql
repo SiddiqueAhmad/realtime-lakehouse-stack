@@ -21,6 +21,18 @@
     __transaction_data_collection_order  this event's position within just
                                        this table, inside the transaction
 
+  (An earlier version of this comment claimed transaction.data_collection_order
+  had to be dropped because Debezium represents it as a STRUCT the JDBC sink
+  can't flatten. That diagnosis was wrong - confirmed by reproducing a real
+  streamed UPDATE locally against the actual debezium-server-dist runner jar
+  and a live Postgres, once with the field present and once without: the
+  error persisted with it removed, and disappeared once it was restored
+  alongside the actual fix - filtering the separate `dbz.transaction` topic
+  out of the transform chain (see application.properties' dropTx/
+  isTxMetadata predicate) rather than letting it reach the JDBC sink
+  unrouted. With that in place, __transaction_data_collection_order comes
+  through as a plain integer per event, exactly as documented above.)
+
   Why LSN, not the commit timestamp, for ORDERING: __source_ts_ns is a
   transaction commit timestamp, and Postgres commits are only timestamped
   once per transaction — two updates to the same row inside one transaction
