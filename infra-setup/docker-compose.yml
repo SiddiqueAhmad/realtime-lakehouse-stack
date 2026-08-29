@@ -68,14 +68,13 @@ services:
   # event log's previous role when it lived in Iceberg (see that file's own
   # comments for why append-only, not upserted, matters for replay/audit).
   #
-  # debezium/server doesn't bundle the JDBC sink by default (it's an
-  # optional connector), so this is a custom image adding
-  # debezium-server-jdbc + the Postgres JDBC driver on top of the official
-  # base - see debezium-server-conf/Dockerfile.
+  # The stock debezium/server image bundles every sink module (JDBC
+  # included) by default - no custom image needed. (An earlier version of
+  # this compose file built a custom image assuming otherwise; that was
+  # wrong, confirmed by this exact JDBC sink working once that assumption
+  # was dropped - see git history if curious.)
   debezium:
-    build:
-      context: debezium-server-conf
-      dockerfile: Dockerfile
+    image: quay.io/debezium/server:3.0.8.Final
     container_name: debezium
     networks:
       warehouse_net:

@@ -14,15 +14,15 @@ name: E2E pipeline reliability (best-effort)
 # Trino/Iceberg/Lakekeeper/MinIO with DuckDB + the `ducklake` extension
 # (self-hosted, Postgres-backed catalog — see warehouse/profiles.yml) and
 # Debezium's JDBC sink (writing straight to warehouse.raw_cdc.* — see
-# infra-setup/debezium-server-conf/) in place of its Iceberg sink. This
-# session's network egress policy blocks both Docker Hub/quay.io image
-# pulls and extensions.duckdb.org, so none of the new pieces — the custom
-# Debezium+JDBC-sink image building, the `ducklake`/`postgres` DuckDB
-# extensions loading, the actual JDBC sink -> raw_cdc table shape — could be
-# exercised end-to-end where this was written. Treat this run as the first
-# real validation of the whole migration, not as already-proven; expect to
-# iterate on it. See infra-setup/debezium-server-conf/Dockerfile and
-# warehouse/profiles.yml for the specific unverified assumptions.
+# infra-setup/debezium-server-conf/) in place of its Iceberg sink. The
+# session that wrote this had no route to Docker Hub/quay.io or
+# extensions.duckdb.org, so none of it could be exercised end-to-end where
+# this was written — but GitHub Actions runners do have that access, and
+# the first two real runs here already found and fixed one wrong assumption
+# (the JDBC sink needing a custom image with hand-added jars — it doesn't;
+# the stock image bundles every sink module by default). Treat each run as
+# still-settling validation, not as already-proven; expect further
+# iteration until it's green.
 #
 # Also dropped in this migration: scenario 08 (minimum-necessary PHI access
 # control). Trino's file-based rules.json enforced the role -> access matrix

@@ -95,11 +95,14 @@ console. It's **not wired to run on every PR** (only `workflow_dispatch` and
 a nightly schedule): standing up Postgres and Debezium from cold is slower
 and has more failure surface than the fast Postgres-only job above.
 Additionally, this workflow was rewritten as part of the DuckDB/DuckLake
-migration (replacing Trino/Iceberg/Lakekeeper/MinIO) in an environment whose
-network egress policy blocks both Docker image pulls and DuckDB's own
-extension repository — the new Debezium JDBC-sink image, the `ducklake`
-extension, and the JDBC sink's actual table-naming/schema-evolution
-behavior could not be exercised where this was written. Treat its first few
-real runs as shakeout, not as already-proven, and promote it to a required
-PR check (and extend it to the 10–12 runbooks) once it's demonstrated
-stable, rather than trusting it blind because it parses.
+migration (replacing Trino/Iceberg/Lakekeeper/MinIO) in an environment with
+no route to Docker Hub/quay.io or DuckDB's own extension repository, so
+none of the new pieces could be exercised end-to-end where this was
+written — actual GitHub Actions runs are this migration's first real
+validation, and its first two runs already found and fixed one wrong
+assumption (the JDBC sink needing a custom image with hand-added jars — it
+doesn't; the stock `debezium/server` image bundles every sink module by
+default). Treat its runs as still-settling validation, not as
+already-proven, and promote it to a required PR check (and extend it to
+the 10–12 runbooks) once it's demonstrated stable, rather than trusting it
+blind because it parses.
