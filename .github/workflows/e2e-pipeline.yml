@@ -358,6 +358,26 @@ jobs:
 
           echo "Scenario 08 passed: minimum-necessary access control enforced as documented in governance/phi_classification.yml."
 
+      - name: Rebuild the gold observability models against final state
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --select gold --profiles-dir .
+
+      - name: Assert observability models were built with sane shape
+        run: |
+          freshness_n=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.cdc_freshness" 2>/dev/null | tail -n1)
+          volume_n=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.cdc_volume_summary" 2>/dev/null | tail -n1)
+          passrate_n=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM gold.quality_pass_rate" 2>/dev/null | tail -n1)
+          echo "cdc_freshness rows: $freshness_n, cdc_volume_summary rows: $volume_n, quality_pass_rate rows: $passrate_n"
+          ok=true
+          [ "${freshness_n:-0}" = "9" ]  || { echo "::error::cdc_freshness: expected 9 dataset rows (one per bronze entity), got $freshness_n"; ok=false; }
+          [ "${volume_n:-0}" = "9" ]     || { echo "::error::cdc_volume_summary: expected 9 dataset rows, got $volume_n"; ok=false; }
+          [ "${passrate_n:-0}" = "9" ]   || { echo "::error::quality_pass_rate: expected 9 dataset rows, got $passrate_n"; ok=false; }
+          [ "$ok" = "true" ] || exit 1
+          echo "Observability models built with the expected shape (9 datasets each)."
+
       - name: Dump service logs on failure
         if: failure()
         working-directory: infra-setup

@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: data_quality_summary
+    description: >
+      Observability rollup: pass/fail record counts per dataset per
+      pipeline run. No PHI-classified column.
+
+  - name: quality_pass_rate
+    description: >
+      Overall PASS rate per dataset, rolled up across every run recorded
+      in data_quality_summary.
+    columns:
+      - name: dataset
+        tests: [not_null, unique]
+
+  - name: cdc_freshness
+    description: >
+      Freshness and CDC lag per dataset: how long between a source commit
+      and it landing in bronze (cdc_lag_seconds), and how long ago bronze
+      was last updated relative to now (staleness_seconds). See
+      macros/cdc_reliability.sql for cdc_source_ts_ns/_loaded_at.
+    columns:
+      - name: dataset
+        tests: [not_null, unique]
+      - name: cdc_lag_seconds
+        tests: [not_null]
+
+  - name: cdc_volume_summary
+    description: >
+      Raw CDC event volume vs. current bronze row count per dataset —
+      how many events the reliability engine's dedup/merge collapsed into
+      each row (events_per_current_row).
+    columns:
+      - name: dataset
+        tests: [not_null, unique]
+      - name: raw_event_count
+        tests: [not_null]
+      - name: bronze_row_count
+        tests: [not_null]
+
+  - name: daily_encounter_summary
+    description: >
+      Aggregate-only encounter metrics (counts by date/type). No
+      PHI-classified column.

@@ -96,7 +96,23 @@ Seeded as synthetic data in `infra-setup/timescale/healthcare.sql`.
 | Silver | `warehouse/models/silver/` | Data quality gates → `quality_status` + `failed_checks` + lineage |
 | Quality | `warehouse/models/quality/` | `trusted_*` / `quarantine_*` split by `quality_status` |
 | De-identified | `warehouse/models/deid/` | Safe-Harbor-style transform of trusted data |
-| Gold | `warehouse/models/gold/` | Aggregate-only analytics + `data_quality_summary` observability rollup |
+| Gold | `warehouse/models/gold/` | Aggregate-only analytics + observability (freshness, CDC lag, volume, quality pass rate) |
+
+## 📈 Observability
+
+Four gold models answer "is the pipeline healthy?" without exposing any
+PHI-classified column — counts, timestamps, and run ids only:
+
+| Model | Answers |
+|---|---|
+| `gold.cdc_freshness` | How stale is each dataset right now, and how long does a change take to land in bronze (CDC lag)? |
+| `gold.cdc_volume_summary` | How many raw CDC events does the reliability engine collapse into each current-state row (dedup/redelivery ratio)? |
+| `gold.data_quality_summary` | Pass/fail record counts per dataset, per pipeline run. |
+| `gold.quality_pass_rate` | Overall PASS rate per dataset, rolled up across runs. |
+
+These read `pipeline_run_id`/`cdc_source_ts_ns`/`_loaded_at` — already
+computed once per row by the reliability engine (`macros/cdc_reliability.sql`)
+— rather than adding a separate metrics-collection mechanism.
 
 ## 🔐 Governance & PHI
 
