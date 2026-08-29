@@ -71,10 +71,16 @@
       removal, so downstream consumers and auditors can still answer "what
       happened to this record and when", instead of the row just vanishing.
 
-  Combined with materialized='incremental' + incremental_strategy='merge' and
-  unique_key=<natural key>, this makes each dbt run of a bronze model
-  idempotent: reprocessing the same CDC offset range twice converges to the
-  same table state instead of drifting.
+  Combined with materialized='incremental' + incremental_strategy='delete+insert'
+  (NOT 'merge' - dbt-duckdb doesn't support it, confirmed by its own adapter
+  code and by a real run failing "The incremental strategy 'merge' is not
+  valid for this adapter" the first time a bronze model was actually
+  re-run incrementally) and unique_key=<natural key>, this makes each dbt
+  run of a bronze model idempotent: reprocessing the same CDC offset range
+  twice converges to the same table state instead of drifting. delete+insert
+  is a real upsert here, not an approximation, precisely because the
+  dedup CTE above already guarantees at most one row per natural key in
+  any incremental batch.
 
   Lineage (record_token / source_event_id / pipeline_run_id — see
   macros/lineage.sql) is computed once, here, at ingestion into the current-
