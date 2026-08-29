@@ -135,8 +135,11 @@ validation, and 4 of the 12 scenarios against a real Postgres service
 container on every PR.
 [`.github/workflows/e2e-pipeline.yml`](.github/workflows/e2e-pipeline.yml)
 runs the actual `docker compose` stack (Debezium → Iceberg → dbt → Trino)
-and asserts two scenarios' outcomes through the real reliability engine, not
-just at the source — but it's nightly/on-demand, not a PR gate, and its
+and asserts scenarios 01–08's outcomes — dedup, ordering, deletes,
+referential integrity, clinical plausibility, completeness, quarantine, and
+minimum-necessary access control (as 4 different Trino identities) — through
+the real reliability engine and Trino's file-based access control, not just
+at the source. But it's nightly/on-demand, not a PR gate, and its
 first real runs are still shakeout (see "What's actually automated in CI" in
 `reliability-tests/README.md` for the honest version of what's proven vs.
 what's aspirational).
