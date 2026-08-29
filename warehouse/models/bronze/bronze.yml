@@ -1,0 +1,55 @@
+version: 2
+
+models:
+  - name: br_patients
+    description: >
+      Reliability-engine output for patients: deduplicated, ordering-safe,
+      soft-delete-aware current state of ehr.patients. See
+      macros/cdc_reliability.sql.
+    columns:
+      - name: patient_id
+        tests: [unique, not_null]
+      - name: cdc_source_ts_ns
+        tests: [not_null]
+
+  - name: br_providers
+    columns:
+      - name: provider_id
+        tests: [unique, not_null]
+
+  - name: br_facilities
+    columns:
+      - name: facility_id
+        tests: [unique, not_null]
+
+  - name: br_encounters
+    columns:
+      - name: encounter_id
+        tests: [unique, not_null]
+      - name: patient_id
+        tests: [not_null]
+
+  - name: br_diagnoses
+    columns:
+      - name: diagnosis_id
+        tests: [unique, not_null]
+
+  - name: br_procedures
+    columns:
+      - name: procedure_id
+        tests: [unique, not_null]
+
+  - name: br_medications
+    columns:
+      - name: medication_id
+        tests: [unique, not_null]
+
+  - name: br_lab_results
+    columns:
+      - name: lab_result_id
+        tests: [unique, not_null]
+
+  - name: br_observations
+    columns:
+      - name: observation_id
+        tests: [unique, not_null]

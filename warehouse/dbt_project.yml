@@ -31,9 +31,15 @@ clean-targets:         # directories to be removed by `dbt clean`
 # files using the `{{ config(...) }}` macro.
 models:
   warehouse:
+    bronze:
+      +schema: bronze
+      +materialized: incremental
     silver:
       +schema: silver
-      +materialized: table
+      +materialized: view
+    deid:
+      +schema: deid
+      +materialized: view
     gold:
       +schema: gold
       +materialized: table
