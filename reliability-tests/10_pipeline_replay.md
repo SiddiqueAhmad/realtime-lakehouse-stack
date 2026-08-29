@@ -30,6 +30,11 @@
 
 **Automated as:** the "scenario 10" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job) — snapshot `gold.cdc_volume_summary`'s per-entity
-row/event counts and `gold.record_lineage_event`'s row count, re-run
-`dbt run --profiles-dir .` with no new writes, and assert both are
-byte-for-byte unchanged.
+row/event counts as a cheap first check, then content-address
+`gold.record_lineage` (every entity's current decision) and
+`gold.record_lineage_event` (the full ledger) with `sha256()` over their
+actual row content, re-run `dbt run --profiles-dir .` with no new writes,
+and assert all three are unchanged. The row-count snapshot alone would pass
+even if replay reshuffled or corrupted individual rows while preserving
+counts — the content hashes are what actually proves byte-for-byte
+identity, not just "nothing was added or dropped."

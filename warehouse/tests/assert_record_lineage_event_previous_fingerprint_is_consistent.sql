@@ -20,7 +20,7 @@ with recomputed as (
         previous_decision_fingerprint as stored_previous_fingerprint,
         lag(decision_fingerprint) over (
             partition by record_token
-            order by logged_at, pipeline_run_id
+            order by event_sequence
         ) as actual_previous_fingerprint
     from {{ ref('record_lineage_event') }}
 

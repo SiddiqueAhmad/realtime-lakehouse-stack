@@ -529,7 +529,7 @@ jobs:
           [ "${history_n:-0}" -ge "2" ] 2>/dev/null || fail "scenario 13: expected record_lineage_event to retain at least 2 decisions for this record_token (quarantine then trusted), got $history_n"
 
           history=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT string_agg(quality_status || '/' || cast(is_trusted as varchar) || '/' || cast(is_quarantined as varchar), ' -> ' ORDER BY logged_at) FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+            "SELECT string_agg(quality_status || '/' || cast(is_trusted as varchar) || '/' || cast(is_quarantined as varchar), ' -> ' ORDER BY event_sequence) FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
           echo "record_lineage_event history for this record_token: $history"
           case "$history" in
             *"FAIL/false/true"*"PASS/true/false"*) ;;
@@ -551,22 +551,59 @@ jobs:
           [ "${fp_check:-0}" = "1" ] || fail "record_lineage_event: expected the PASS row's previous_decision_fingerprint to equal the FAIL row's own decision_fingerprint, got count=$fp_check"
           echo "record_lineage_event OK: decision_transition and previous_decision_fingerprint correctly read the quarantine -> trusted correction off a single row."
 
+      - name: Re-run the full test suite (post scenario-13 regression check)
+        # Scenario 13 is the one scenario in this workflow whose correction
+        # changes a record's logged decision WITHOUT touching that record's
+        # own bronze row (only the referenced patient row is new - see
+        # 13_quarantine_correction.sql's own comment). That's exactly the
+        # condition that once let gold.record_lineage_event mint a
+        # duplicate ledger_key silently: pipeline_run_id (previously part
+        # of ledger_key) is inherited from bronze at merge time, so a
+        # second ledger entry for the same record_token, appended while its
+        # own bronze row is unchanged, could carry the same pipeline_run_id
+        # as the first - and dbt test only ran once, before any scenario
+        # had executed, so gold.yml's unique test on ledger_key never got a
+        # chance to see the collision. Fixed by keying ledger_key on
+        # event_sequence (record_lineage_event.sql's own per-record_token
+        # counter) instead - but the fix is only worth anything if this
+        # workflow actually re-tests after the one scenario that can
+        # trigger it, so it does now.
+        working-directory: warehouse
+        run: ../.venv/bin/dbt test --profiles-dir .
+
       - name: Capture scenario 10's pre-replay snapshot (pipeline replay)
         # reliability-tests/10_pipeline_replay.md, automated: a plain re-run
         # of dbt with no new source writes must be a no-op on the data.
-        # gold.cdc_volume_summary already carries one row per bronze entity
-        # with raw_event_count/current_row_count - a single string_agg over
-        # it is exactly runbook 10's "record row counts... across bronze"
-        # step, for all 9 entities at once rather than just one table.
+        #
+        # Row/event counts alone (gold.cdc_volume_summary) prove nothing
+        # got added or dropped, but not that any surviving row's own
+        # content is unchanged - a replay that reshuffled or corrupted
+        # individual rows while preserving counts would still pass a
+        # counts-only check. Content-address gold.record_lineage (current
+        # decision for every entity, unioned - the read side of "did any
+        # record's outcome change") and gold.record_lineage_event (the full
+        # ledger, ordered by event_sequence - "did replay alter or
+        # manufacture history") with sha256 over their actual row content
+        # instead, so the after-replay assertion is a genuine byte-content
+        # comparison, not just a row-count proxy for one.
         run: |
           snapshot=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT string_agg(dataset || ':' || raw_event_count || ':' || current_row_count, ',' ORDER BY dataset) FROM gold.cdc_volume_summary" \
             2>/dev/null | tail -n1)
           echo "$snapshot" > /tmp/scenario10_volume_snapshot.txt
-          lineage_count=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT count(*) FROM gold.record_lineage_event" 2>/dev/null | tail -n1)
-          echo "$lineage_count" > /tmp/scenario10_lineage_count.txt
-          echo "Captured pre-replay snapshot (record_lineage_event count=$lineage_count): $snapshot"
+
+          lineage_hash=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT sha256(string_agg(record_token || '|' || coalesce(source_event_id, '') || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token)) FROM gold.record_lineage" \
+            2>/dev/null | tail -n1)
+          echo "$lineage_hash" > /tmp/scenario10_lineage_hash.txt
+
+          event_hash=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT sha256(string_agg(record_token || '|' || cast(event_sequence AS varchar) || '|' || decision_fingerprint || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event" \
+            2>/dev/null | tail -n1)
+          echo "$event_hash" > /tmp/scenario10_event_hash.txt
+
+          echo "Captured pre-replay volume snapshot: $snapshot"
+          echo "Captured pre-replay content hashes: record_lineage=$lineage_hash record_lineage_event=$event_hash"
 
       - name: Re-run the full pipeline with no new source writes (scenario 10 replay)
         working-directory: warehouse
@@ -581,11 +618,19 @@ jobs:
             2>/dev/null | tail -n1)
           [ "$snapshot_after" = "$snapshot_before" ] || fail "scenario 10: bronze row/event counts changed on a no-op replay. Before: $snapshot_before After: $snapshot_after"
 
-          lineage_before=$(cat /tmp/scenario10_lineage_count.txt)
-          lineage_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT count(*) FROM gold.record_lineage_event" 2>/dev/null | tail -n1)
-          [ "$lineage_after" = "$lineage_before" ] || fail "scenario 10: record_lineage_event grew on a no-op replay (before=$lineage_before after=$lineage_after) - a re-run with no source changes must not manufacture new decision history."
-          echo "Scenario 10 passed: dbt run with no new source writes is a true no-op on bronze row/event counts and lineage history."
+          lineage_hash_before=$(cat /tmp/scenario10_lineage_hash.txt)
+          lineage_hash_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT sha256(string_agg(record_token || '|' || coalesce(source_event_id, '') || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token)) FROM gold.record_lineage" \
+            2>/dev/null | tail -n1)
+          [ "$lineage_hash_after" = "$lineage_hash_before" ] || fail "scenario 10: gold.record_lineage's content hash changed on a no-op replay (before=$lineage_hash_before after=$lineage_hash_after) - every entity's current decision must be byte-identical, not just its row count."
+
+          event_hash_before=$(cat /tmp/scenario10_event_hash.txt)
+          event_hash_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT sha256(string_agg(record_token || '|' || cast(event_sequence AS varchar) || '|' || decision_fingerprint || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event" \
+            2>/dev/null | tail -n1)
+          [ "$event_hash_after" = "$event_hash_before" ] || fail "scenario 10: gold.record_lineage_event's content hash changed on a no-op replay (before=$event_hash_before after=$event_hash_after) - a re-run with no source changes must not alter or manufacture ledger history."
+
+          echo "Scenario 10 passed: dbt run with no new source writes is a true no-op, verified by content hash over every row's actual data - not just row counts - across both current-state and ledger history."
 
       - name: Kill Debezium, then write a new diagnosis while it's down (scenario 11 setup)
         # reliability-tests/11_partial_cdc_failure.md, automated: rather than
