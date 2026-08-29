@@ -2,24 +2,41 @@
   CDC reliability engine.
 
   Debezium's unwrap SMT (see infra-setup/debezium-server-conf/application.properties)
-  flattens each change event and adds five fields we rely on here:
-    __op             insert / update / delete ('c' / 'u' / 'd', or 'r' for a
-                      snapshot read)
-    __table          source table name
-    __source_ts_ns   the source database's commit timestamp, in nanoseconds —
-                      informational event time, NOT used for ordering (see below)
-    __source_lsn     the source WAL log sequence number this change was
-                      written at — our ordering key
-    __db             source database name
+  flattens each change event and adds these fields we rely on here:
+    __op                              insert / update / delete ('c' / 'u' /
+                                       'd', or 'r' for a snapshot read)
+    __table                           source table name
+    __source_ts_ns                    the source database's commit timestamp,
+                                       in nanoseconds — informational event
+                                       time, NOT used for ordering (see below)
+    __source_lsn                      the source WAL log sequence number
+                                       this change was written at — our
+                                       ordering key
+    __db                              source database name
+    __transaction_id                  the source transaction this event was
+                                       part of (null for a snapshot read —
+                                       see provide.transaction.metadata)
+    __transaction_total_order         this event's position across the whole
+                                       transaction (null for a snapshot read)
+    __transaction_data_collection_order  this event's position within just
+                                       this table, inside the transaction
 
-  Why LSN, not the commit timestamp: __source_ts_ns is a transaction commit
-  timestamp, and Postgres commits are only timestamped once per transaction —
-  two updates to the same row inside one transaction get the *same*
-  __source_ts_ns. Ordering on it needs a tie-breaker or it's nondeterministic.
-  __source_lsn doesn't have that problem: Postgres assigns a distinct,
-  strictly increasing LSN to every WAL record, including each row-level
-  change within a single transaction, so it's a total order over CDC events
-  even at sub-transaction granularity.
+  Why LSN, not the commit timestamp, for ORDERING: __source_ts_ns is a
+  transaction commit timestamp, and Postgres commits are only timestamped
+  once per transaction — two updates to the same row inside one transaction
+  get the *same* __source_ts_ns. Ordering on it needs a tie-breaker or it's
+  nondeterministic. __source_lsn doesn't have that problem: Postgres assigns
+  a distinct, strictly increasing LSN to every WAL record, including each
+  row-level change within a single transaction, so it's a total order over
+  CDC events even at sub-transaction granularity — the right key for "is
+  this newer than what I already merged".
+
+  Why transaction metadata too, for EVENT IDENTITY: LSN alone answers
+  ordering, but source_event_id (macros/lineage.sql) is meant to answer "is
+  this exactly the same CDC event" for audit/forensic replay — which
+  transaction it belongs to and where in that transaction it falls is part
+  of that identity, not just its position in the WAL. See
+  generate_source_event_id.
 
   The raw Iceberg table this reads from is an append-only event log
   (debezium.sink.iceberg.upsert=false) — every change event is preserved,
@@ -46,9 +63,8 @@
 
   Lineage (record_token / source_event_id / pipeline_run_id — see
   macros/lineage.sql) is computed once, here, at ingestion into the current-
-  state projection, keyed on the natural key and the LSN of the event that
-  produced this version of the row. Downstream layers inherit it via
-  `select *` rather than recomputing it.
+  state projection. Downstream layers inherit it via `select *` rather than
+  recomputing it.
 #}
 
 {% macro cdc_reliable_select(source_name, table_name, natural_key_alias, source_columns, column_list) %}
@@ -57,11 +73,14 @@ with source_raw as (
 
     select
         {{ source_columns }},
-        __op            as cdc_operation,
-        __table         as cdc_source_table,
-        __source_ts_ns  as cdc_source_ts_ns,
-        __source_lsn    as cdc_source_lsn,
-        __db            as cdc_source_db
+        __op                                  as cdc_operation,
+        __table                                as cdc_source_table,
+        __source_ts_ns                         as cdc_source_ts_ns,
+        __source_lsn                           as cdc_source_lsn,
+        __db                                    as cdc_source_db,
+        __transaction_id                       as cdc_transaction_id,
+        __transaction_total_order              as cdc_transaction_total_order,
+        __transaction_data_collection_order    as cdc_transaction_data_collection_order
     from {{ source(source_name, table_name) }}
 
 ),
@@ -75,6 +94,9 @@ ranked as (
         cdc_source_ts_ns,
         cdc_source_lsn,
         cdc_source_db,
+        cdc_transaction_id,
+        cdc_transaction_total_order,
+        cdc_transaction_data_collection_order,
         row_number() over (
             partition by {{ natural_key_alias }}
             order by cdc_source_lsn desc
@@ -91,7 +113,10 @@ deduplicated as (
         cdc_source_table,
         cdc_source_ts_ns,
         cdc_source_lsn,
-        cdc_source_db
+        cdc_source_db,
+        cdc_transaction_id,
+        cdc_transaction_total_order,
+        cdc_transaction_data_collection_order
     from ranked
     where _rn = 1
 
@@ -105,8 +130,17 @@ select
     cdc_source_ts_ns,
     cdc_source_lsn,
     cdc_source_db,
+    cdc_transaction_id,
+    cdc_transaction_total_order,
+    cdc_transaction_data_collection_order,
     {{ dbt.current_timestamp() }} as _loaded_at,
-    {{ lineage_columns('d.' ~ natural_key_alias, 'd.cdc_source_lsn') }}
+    {{ lineage_columns(
+        'd.cdc_source_table',
+        'd.' ~ natural_key_alias,
+        'd.cdc_transaction_id',
+        'd.cdc_transaction_total_order',
+        'd.cdc_source_lsn'
+    ) }}
 from deduplicated d
 {% if is_incremental() %}
 where d.cdc_source_lsn > (

@@ -132,10 +132,14 @@ recovery — against the questions this platform needs to answer:
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `dbt parse`, JSON
 validation, and 5 of the 12 scenarios against a real Postgres service
-container on every PR — see "What's actually automated in CI" in
-`reliability-tests/README.md` for exactly what that does and doesn't cover
-(the bronze/silver/quality reliability guarantees themselves still need the
-live Debezium/Iceberg/Trino stack, which CI doesn't stand up yet).
+container on every PR.
+[`.github/workflows/e2e-pipeline.yml`](.github/workflows/e2e-pipeline.yml)
+runs the actual `docker compose` stack (Debezium → Iceberg → dbt → Trino)
+and asserts a scenario's outcome through the real reliability engine, not
+just at the source — but it's nightly/on-demand, not a PR gate, and its
+first real runs are still shakeout (see "What's actually automated in CI" in
+`reliability-tests/README.md` for the honest version of what's proven vs.
+what's aspirational).
 
 ---
 

@@ -17,6 +17,12 @@ models:
           per-transaction commit timestamp and can repeat within one
           transaction.
         tests: [not_null]
+      - name: cdc_transaction_id
+        description: >
+          The source transaction this event was part of (Debezium transaction
+          metadata). Null for a snapshot ('r') event, which isn't part of a
+          streamed transaction. Feeds source_event_id's fingerprint —
+          see macros/lineage.sql.
       - name: record_token
         tests: [unique, not_null]
 

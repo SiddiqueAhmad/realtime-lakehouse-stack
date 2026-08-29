@@ -68,6 +68,19 @@ lineage token generation — because those are properties of the
 bronze/silver/quality dbt layers running against a live Debezium → Iceberg →
 Trino pipeline, which this workflow doesn't stand up. Nor does it cover
 scenarios 02, 05, 08 (need Trino) or the operational runbooks 10–12 (need
-the full `docker compose` stack). A docker-compose-based integration job
-that runs the whole suite end-to-end is tracked as follow-up work, not yet
-built.
+the full `docker compose` stack).
+
+`.github/workflows/e2e-pipeline.yml` covers that gap: it runs the actual
+`docker compose up` stack (Postgres → Debezium → Iceberg → dbt → Trino),
+waits for Debezium's initial snapshot and scenario 01's update events to
+land, runs `dbt run` for real, and asserts scenario 01's outcome by querying
+`bronze.br_patients` through Trino — proving the reliability engine, not
+just the source write. It's **not wired to run on every PR** (only
+`workflow_dispatch` and a nightly schedule): standing up MinIO, Lakekeeper,
+Postgres, Debezium, and Trino from cold and waiting on a CDC snapshot is
+slow and has more failure surface than the fast Postgres-only job above, and
+— since this sandbox has no Docker daemon — it was written and reviewed but
+**could not actually be executed here**. Treat its first few real runs as
+shakeout, and promote it to a required PR check (and extend it to the
+out-of-order/quarantine scenarios) once it's demonstrated stable, rather
+than trusting it blind because it parses.

@@ -1,0 +1,128 @@
+name: E2E pipeline reliability (best-effort)
+
+# Runs the full Postgres -> Debezium -> Iceberg -> dbt -> Trino pipeline via
+# docker compose and asserts a reliability scenario's outcome through the
+# actual bronze/silver layers, not just at the Postgres source.
+#
+# Deliberately NOT gating every PR (workflow_dispatch + nightly only): this
+# stands up MinIO, Lakekeeper, Postgres, Debezium, and Trino from cold and
+# waits on Debezium's initial snapshot landing in Iceberg, which is slow and
+# has more moving parts than the fast Postgres-only job in ci.yml. It was
+# written and reviewed but could not be executed in the environment that
+# authored it (no Docker daemon available there — see reliability-tests/README.md);
+# treat its first few real runs as shakeout, not as already-proven, and
+# promote it to a required PR check once it's demonstrated stable.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'   # nightly
+
+jobs:
+  e2e-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Install dbt + deps
+        run: uv sync
+
+      - name: Install Trino CLI
+        run: |
+          curl -sSLo /usr/local/bin/trino \
+            https://repo1.maven.org/maven2/io/trino/trino-cli/442/trino-cli-442-executable.jar
+          chmod +x /usr/local/bin/trino
+
+      - name: Start the stack
+        working-directory: infra-setup
+        run: docker compose up -d
+
+      - name: Wait for Trino to accept queries
+        run: |
+          for i in $(seq 1 60); do
+            if trino --server http://localhost:8080 --execute "SELECT 1" > /dev/null 2>&1; then
+              echo "Trino is up"
+              exit 0
+            fi
+            echo "waiting for Trino... ($i/60)"
+            sleep 5
+          done
+          echo "::error::Trino did not become ready in time"
+          exit 1
+
+      - name: Wait for Debezium's initial snapshot to land in Iceberg
+        # 4 seed patients (see infra-setup/timescale/healthcare.sql) is the
+        # known-good row count for a clean start.
+        run: |
+          for i in $(seq 1 60); do
+            n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients" \
+                  2>/dev/null | tail -n1 || echo 0)
+            if [ "${n:-0}" -ge "4" ] 2>/dev/null; then
+              echo "snapshot landed ($n rows)"
+              exit 0
+            fi
+            echo "waiting for CDC snapshot... ($i/60, currently $n rows)"
+            sleep 10
+          done
+          echo "::error::Debezium's initial snapshot did not land in time"
+          exit 1
+
+      - name: dbt seed + run + test
+        working-directory: warehouse
+        run: |
+          ../.venv/bin/dbt seed --profiles-dir .
+          ../.venv/bin/dbt run  --profiles-dir .
+          ../.venv/bin/dbt test --profiles-dir .
+
+      - name: Run scenario 01 (duplicate patient event) against the live source
+        run: |
+          PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr \
+            -v ON_ERROR_STOP=1 -f reliability-tests/01_duplicate_patient_event.sql
+
+      - name: Wait for Debezium to stream the update
+        run: |
+          for i in $(seq 1 30); do
+            n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 1" \
+                  2>/dev/null | tail -n1 || echo 0)
+            # Two new UPDATE events for patient 1 on top of the 1 snapshot row.
+            if [ "${n:-0}" -ge "3" ] 2>/dev/null; then
+              echo "update events landed ($n raw rows for patient 1)"
+              break
+            fi
+            echo "waiting for CDC update events... ($i/30, currently $n rows)"
+            sleep 5
+          done
+
+      - name: Re-run bronze/silver for patients
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --select br_patients sl_patients --profiles-dir .
+
+      - name: Assert scenario 01's outcome through the actual reliability engine
+        run: |
+          result=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED \
+                     --execute "SELECT count(*) || ',' || max_by(phone, cdc_source_lsn) FROM bronze.br_patients WHERE medical_record_number = 'MRN-SYN-00001'" \
+                     2>/dev/null | tail -n1)
+          echo "bronze.br_patients result: $result"
+          if [ "$result" != "1,555-010-9902" ]; then
+            echo "::error::Expected exactly 1 row with phone=555-010-9902 (dedup/ordering through the real pipeline), got: $result"
+            exit 1
+          fi
+          echo "Scenario 01 passed end-to-end through Postgres -> Debezium -> Iceberg -> dbt bronze."
+
+      - name: Dump service logs on failure
+        if: failure()
+        working-directory: infra-setup
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        working-directory: infra-setup
+        run: docker compose down -v
