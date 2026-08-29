@@ -137,9 +137,28 @@ services:
       - ./timescale/warehouse-db-init.sql:/warehouse-db-init.sql:ro
     entrypoint: ["sh", "-c"]
     command:
+      # Retries around the psql call, not just a bare invocation: `db`'s
+      # own healthcheck can report healthy in a narrow window during
+      # TimescaleDB's two-phase startup (initdb, then an immediate
+      # restart to apply tuned settings - see timescale/init-all.sh's own
+      # log output) where the server is between those two processes and
+      # genuinely not accepting connections yet. Confirmed as a real,
+      # recurring race - not a one-off - by two separate e2e-pipeline.yml
+      # runs failing identically ("connection to server at db ... port
+      # 5432 failed: Connection refused") right as docker compose reports
+      # `db` healthy, on two different commits. `depends_on: service_healthy`
+      # only gates container start order, not "the server inside is
+      # actually ready this instant" - so retry here rather than trying
+      # to make the healthcheck itself airtight against a race in a
+      # process this container doesn't control.
       - >
-        PGPASSWORD=testpass psql -v ON_ERROR_STOP=1 -h db -U testuser -d test
-        -f /warehouse-db-init.sql
+        for i in $$(seq 1 15); do
+        PGPASSWORD=testpass psql -v ON_ERROR_STOP=1 -h db -U testuser -d test -f /warehouse-db-init.sql && exit 0;
+        echo "warehouse-db-init: psql failed (attempt $$i/15), retrying in 2s..." >&2;
+        sleep 2;
+        done;
+        echo "warehouse-db-init: giving up after 15 attempts" >&2;
+        exit 1
 
 networks:
   warehouse_net:
