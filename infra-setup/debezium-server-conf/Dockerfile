@@ -11,23 +11,29 @@
 #
 # UNVERIFIED IN SANDBOX: this session has no route to Maven Central (same
 # disclosed constraint as everywhere else in this migration) so this
-# Dockerfile's build itself could not be run here. It replaces an earlier,
-# now-confirmed-wrong attempt (guessed Maven coordinates that 404'd) and a
-# second wrong attempt (assuming the stock image needed no jars at all,
-# based on a since-corrected misreading of Debezium Server's own docs).
-# First real build + run happens in CI
-# (.github/workflows/e2e-pipeline.yml) - this is genuinely the third
-# iteration on this one piece, each grounded in real evidence from the
-# previous run's actual failure, not a fresh guess.
+# Dockerfile's build itself could not be run here. Prior iterations, each
+# grounded in the previous run's actual failure, not a fresh guess: a
+# guessed Maven coordinate that 404'd; assuming the stock image needed no
+# jars at all (wrong - "No Debezium consumer named 'jdbc'"); the tar
+# extraction itself failing on a missing gzip binary (this version's
+# `microdnf install -y gzip` fix). First real build + run happens in CI
+# (.github/workflows/e2e-pipeline.yml).
 ARG DEBEZIUM_VERSION=3.0.8.Final
 FROM quay.io/debezium/server:${DEBEZIUM_VERSION}
 
 ARG DEBEZIUM_VERSION=3.0.8.Final
 
 USER root
-RUN curl -fsSL -o /tmp/debezium-server-dist.tar.gz \
+# Real run (33249165571): the download succeeded, but extraction failed -
+# "tar (child): gzip: Cannot exec: No such file or directory". The base
+# image is registry.access.redhat.com/ubi8/openjdk-11 (confirmed via
+# search of Debezium's own Dockerfile, not assumed) - a UBI image that
+# doesn't ship gzip by default; microdnf is its package manager.
+RUN microdnf install -y gzip \
+    && curl -fsSL -o /tmp/debezium-server-dist.tar.gz \
       "https://repo1.maven.org/maven2/io/debezium/debezium-server-dist/${DEBEZIUM_VERSION}/debezium-server-dist-${DEBEZIUM_VERSION}.tar.gz" \
     && rm -rf /debezium/lib /debezium/*.jar \
     && tar xzf /tmp/debezium-server-dist.tar.gz -C /debezium --strip-components 1 \
-    && rm -f /tmp/debezium-server-dist.tar.gz
+    && rm -f /tmp/debezium-server-dist.tar.gz \
+    && microdnf clean all
 USER 1001
