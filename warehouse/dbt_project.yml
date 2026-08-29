@@ -37,6 +37,9 @@ models:
     silver:
       +schema: silver
       +materialized: view
+    quality:
+      +schema: quality
+      +materialized: view
     deid:
       +schema: deid
       +materialized: view

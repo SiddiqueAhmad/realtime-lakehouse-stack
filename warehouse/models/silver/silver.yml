@@ -1,0 +1,54 @@
+version: 2
+
+models:
+  - name: sl_patients
+    description: >
+      Data-quality-gated patients: bronze rows (soft-deletes excluded) plus
+      quality_status/failed_checks and lineage columns. See
+      macros/data_quality.sql and macros/lineage.sql.
+    columns:
+      - name: patient_id
+        tests: [not_null]
+      - name: quality_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['PASS', 'FAIL']
+      - name: record_token
+        tests: [not_null, unique]
+
+  - name: sl_providers
+  - name: sl_facilities
+
+  - name: sl_encounters
+    columns:
+      - name: quality_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['PASS', 'FAIL']
+
+  - name: sl_diagnoses
+    columns:
+      - name: quality_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['PASS', 'FAIL']
+
+  - name: sl_procedures
+  - name: sl_medications
+
+  - name: sl_lab_results
+    description: >
+      Adds a clinical-plausibility gate (result_out_of_range) driven by
+      seeds/lab_reference_ranges.csv, in addition to completeness and
+      referential-integrity checks.
+    columns:
+      - name: quality_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['PASS', 'FAIL']
+
+  - name: sl_observations

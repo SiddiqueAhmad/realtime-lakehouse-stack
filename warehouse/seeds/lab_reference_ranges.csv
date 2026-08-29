@@ -1,0 +1,7 @@
+loinc_code,test_name,min_plausible_value,max_plausible_value
+4548-4,Hemoglobin A1c,2.0,20.0
+2160-0,Creatinine,0.1,20.0
+2823-3,Potassium,1.0,10.0
+2951-2,Sodium,100.0,180.0
+2345-7,Glucose,10.0,2000.0
+718-7,Hemoglobin,2.0,25.0
