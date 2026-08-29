@@ -13,13 +13,13 @@ ADMIN_FIRST_NAME = os.getenv("MB_ADMIN_FIRST_NAME")
 ADMIN_LAST_NAME = os.getenv("MB_ADMIN_LAST_NAME")
 SITE_NAME = os.getenv("MB_SITE_NAME")
 
-# Inventory DB (Postgres) Details
-INVENTORY_DB_NAME = "Inventory DB"
+# Operational EHR DB (Postgres) Details
+INVENTORY_DB_NAME = "Healthcare EHR DB"
 INVENTORY_DB_HOST = os.getenv("INVENTORY_DB_HOST", "db")
 INVENTORY_DB_PORT = int(os.getenv("INVENTORY_DB_PORT", 5432))
 INVENTORY_DB_USER = os.getenv("INVENTORY_DB_USER", "testuser")
 INVENTORY_DB_PASS = os.getenv("INVENTORY_DB_PASS", "testpass")
-INVENTORY_DB_DBNAME = os.getenv("INVENTORY_DB_DBNAME", "inventory")
+INVENTORY_DB_DBNAME = os.getenv("INVENTORY_DB_DBNAME", "ehr")
 
 # Trino DB Details
 TRINO_DB_NAME = "Trino Iceberg"

@@ -49,11 +49,11 @@ services:
       MB_ADMIN_FIRST_NAME: Admin
       MB_ADMIN_LAST_NAME: User
       MB_SITE_NAME: My Iceberg Data Platform
-      # Inventory DB Details
+      # EHR (operational healthcare) DB Details
       INVENTORY_DB_HOST: db
       INVENTORY_DB_USER: testuser
       INVENTORY_DB_PASS: testpass
-      INVENTORY_DB_DBNAME: inventory
+      INVENTORY_DB_DBNAME: ehr
       # Trino Details
       TRINO_DB_HOST: trino
       TRINO_DB_USER: admin # Default trino user
@@ -95,7 +95,7 @@ services:
       start_period: 10s
     volumes:
       - ./timescale/init-all.sh:/docker-entrypoint-initdb.d/01-init-all.sh
-      - ./timescale/inventory.sql:/docker-entrypoint-initdb.d/inventory.sql
+      - ./timescale/healthcare.sql:/docker-entrypoint-initdb.d/healthcare.sql
     command:
       - "postgres"
       - "-c"
