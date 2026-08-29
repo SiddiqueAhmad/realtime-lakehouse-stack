@@ -115,10 +115,23 @@ jobs:
         # files instead so a real failure is visible, not masked.
         run: |
           for i in $(seq 1 60); do
-            .venv/bin/python3 infra-setup/scripts/dq.py \
+            # `if cmd; then` is deliberate, not decorative: this step runs
+            # under `bash -e` (the GitHub Actions default), which aborts
+            # the whole script the instant any bare, unguarded command
+            # fails - rc=$? on the next line would never even run. Wrapping
+            # the call as an if-condition is one of the few constructs -e
+            # exempts from that, so a real dq.py failure is something this
+            # loop can see and retry on, not something that silently kills
+            # the step with no output (which is exactly what happened on
+            # the previous run: instant failure, zero lines of diagnostic
+            # output, before this fix).
+            if .venv/bin/python3 infra-setup/scripts/dq.py \
                   "SELECT count(*) FROM raw.raw_cdc.patients" \
-                  > /tmp/dq_out.log 2> /tmp/dq_err.log
-            rc=$?
+                  > /tmp/dq_out.log 2> /tmp/dq_err.log; then
+              rc=0
+            else
+              rc=$?
+            fi
             n=$(tail -n1 /tmp/dq_out.log)
             if [ $rc -eq 0 ] && [ "${n:-0}" -ge "4" ] 2>/dev/null; then
               echo "snapshot landed ($n rows)"
