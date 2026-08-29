@@ -8,4 +8,12 @@ dependencies = [
     "dbt-core>=1.10.13",
     "dbt-duckdb>=1.9.6",
     "duckdb>=1.4.1",
+    # dbt-duckdb doesn't declare this itself (checked: `pip show dbt-duckdb`
+    # lists only dbt-adapters/dbt-common/dbt-core/duckdb as Requires), but
+    # needs it at runtime for `dbt seed` and other DataFrame-backed code
+    # paths - confirmed by a real `dbt seed` run failing with duckdb's own
+    # "Invalid Input Error: 'numpy' is required for this operation, but it
+    # wasn't installed" once it actually reached a live database for the
+    # first time in this migration (e2e-pipeline.yml run 33257478754).
+    "pandas>=2.0",
 ]
