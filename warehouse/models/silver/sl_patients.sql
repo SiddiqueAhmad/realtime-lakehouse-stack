@@ -11,7 +11,7 @@ with base as (
     'missing_mrn':   'medical_record_number is not null',
     'missing_name':  'first_name is not null and last_name is not null',
     'invalid_dob':   'date_of_birth is not null and date_of_birth <= current_date',
-    'invalid_email': "email is null or regexp_like(email, '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')"
+    'invalid_email': "email is null or regexp_matches(email, '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')"
 } %}
 
 select

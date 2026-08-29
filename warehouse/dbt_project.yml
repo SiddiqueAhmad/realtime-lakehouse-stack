@@ -45,4 +45,11 @@ models:
       +materialized: view
     gold:
       +schema: gold
+      # Default only - every current gold model overrides this to
+      # materialized='incremental' + incremental_strategy='append' + a
+      # pre_hook DELETE instead, because plain 'table' (like 'view') hits
+      # a confirmed, currently-open DuckLake bug (duckdb/ducklake#509) on
+      # any model's second build. See any models/gold/*.sql file's own
+      # header comment for the full story before giving a new gold model
+      # a bare materialized='table' here.
       +materialized: table

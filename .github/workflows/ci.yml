@@ -6,13 +6,6 @@ on:
   pull_request:
 
 jobs:
-  json-validation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate infra-setup/trino/rules.json is well-formed
-        run: python3 -m json.tool infra-setup/trino/rules.json > /dev/null
-
   dbt-parse:
     runs-on: ubuntu-latest
     steps:
@@ -57,9 +50,9 @@ jobs:
       - name: Assert scenario outcomes at the source
         run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -f reliability-tests/ci_assertions_postgres.sql
 
-  # NOTE: this does not yet cover the Trino-based scenarios (02, 05, 08) or
-  # the bronze/silver/quality reliability guarantees (dedup, ordering,
-  # quarantine) those Postgres-side scenarios feed into — those need the
-  # full Debezium/Iceberg/Trino stack via `docker compose up`, which isn't
-  # run in this workflow. Tracked as follow-up: a docker-compose-based
-  # integration job. See reliability-tests/README.md.
+  # NOTE: this does not yet cover the scenarios that write directly to the
+  # raw CDC event log (01, 03, 05, 13) or the bronze/silver/quality
+  # reliability guarantees (dedup, ordering, quarantine) those Postgres-side
+  # scenarios feed into — those need the full Debezium/DuckDB/DuckLake stack
+  # via `docker compose up`, which isn't run in this workflow. That's
+  # .github/workflows/e2e-pipeline.yml. See reliability-tests/README.md.

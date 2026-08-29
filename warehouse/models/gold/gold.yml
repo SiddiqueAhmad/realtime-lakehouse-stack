@@ -92,3 +92,36 @@ models:
         tests: [not_null]
       - name: is_quarantined
         tests: [not_null]
+
+  - name: record_lineage_event
+    description: >
+      Historical operational lineage / incident timeline: an append-only log
+      of every quality decision record_lineage has ever computed for a
+      record, keyed the same way (record_token, PHI-free). Unlike
+      record_lineage (current-state, one row per record), this retains prior
+      decisions — a record that was quarantined and later corrected to
+      trusted has both rows here, in order. A new row is appended only when
+      a record's decision actually changes from the last one logged for it,
+      not on every run. See the model's own docstring, including its
+      documented limitation (one entry per dbt run in which a decision
+      changed, not one per underlying CDC event).
+    columns:
+      - name: ledger_key
+        # record_token || ':' || pipeline_run_id. Unique because record_lineage
+        # (this model's source) has at most one row per record_token per run,
+        # and pipeline_run_id is one value per dbt invocation. This is a
+        # traceability label (which run observed the change), not what
+        # enforces retry-safety - see decision_fingerprint for that.
+        tests: [not_null, unique]
+      - name: decision_fingerprint
+        # sha256 of the fields the model's own change-detection compares on
+        # (record_token/source_event_id/quality_status/failed_checks/
+        # is_trusted/is_quarantined). See
+        # tests/assert_record_lineage_event_never_duplicates_a_decision.sql
+        # for the actual retry-safety check this makes explicit: no two
+        # consecutive rows for one record_token may share a fingerprint.
+        tests: [not_null]
+      - name: record_token
+        tests: [not_null]
+      - name: logged_at
+        tests: [not_null]

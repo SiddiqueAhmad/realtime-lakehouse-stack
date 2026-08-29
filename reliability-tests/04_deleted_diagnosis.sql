@@ -16,7 +16,7 @@ DELETE FROM ehr.diagnoses WHERE diagnosis_id = 3; -- J06.9, patient 3
 --     is_deleted = true and cdc_operation = 'd' (audit trail preserved).
 --   - silver.sl_diagnoses and quality.trusted_diagnoses no longer include it.
 --
--- VERIFY (trino --server localhost:8080 --catalog iceberg):
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
 --   SELECT is_deleted, cdc_operation FROM bronze.br_diagnoses WHERE diagnosis_id = 3;
 --   -- is_deleted = true, cdc_operation = 'd'
 --   SELECT count(*) FROM silver.sl_diagnoses WHERE diagnosis_id = 3;

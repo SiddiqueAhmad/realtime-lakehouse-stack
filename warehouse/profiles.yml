@@ -1,13 +1,88 @@
-
 warehouse:
   target: dev
   outputs:
     dev:
-      type: trino
-      method: http
-      host: localhost
-      port: 8080
-      user: trino
-      catalog: iceberg
-      schema: icebergdata
+      type: duckdb
+      # Primary connection is deliberately just :memory: - the actual
+      # warehouse (a self-hosted DuckLake catalog, backed by Postgres: the
+      # same `db` service already running everything else in this stack, no
+      # extra catalog service needed) is a named `attach:` entry below, not
+      # this `path:`. That's not cosmetic: dbt-duckdb derives the default
+      # `database` name from `path` via path_derived_database_name(), which
+      # for a `ducklake:postgres:dbname=... host=... ...` path mis-parses
+      # the space-separated DSN as if it were a nested URL and produces the
+      # DSN string itself, verbatim (down to the password) - confirmed by a
+      # real run (e2e-pipeline.yml 33257742502) failing dbt seed with
+      # `Binder Error: Catalog "dbname=warehouse host=localhost port=5433
+      # user=testuser ***" does not exist!`, then reading
+      # dbt/adapters/duckdb/credentials.py's actual path_derived_database_name
+      # implementation to confirm why. Putting the ducklake connection in
+      # `attach:` with an explicit alias (matching how
+      # infra-setup/scripts/dq.py already attaches it successfully) and
+      # setting `database:` to that alias sidesteps the broken inference
+      # entirely - dbt-duckdb explicitly allows `database` to differ from
+      # the path-derived name when it matches an attach alias (see that
+      # same file's __pre_deserialize__).
+      path: ":memory:"
+      database: lake
+      extensions:
+        - postgres
+      # DuckLake stores table *metadata* (snapshots, schema, file listing)
+      # transactionally in Postgres and *data* as Parquet under DATA_PATH,
+      # which is what gives this stack real multi-process concurrent
+      # read/write safety - a bare local .duckdb file doesn't have that.
+      # This is the replacement for Iceberg + Lakekeeper's REST catalog +
+      # MinIO. The `options` dict (not a top-level credentials field - only
+      # Attachment has one, confirmed by reading credentials.py; a
+      # top-level `options:` here, as an earlier version of this file had,
+      # is silently ignored, meaning DATA_PATH was never actually being
+      # passed at all) is what maps to DuckDB's ATTACH ... (DATA_PATH
+      # '...') clause.
+      #
+      # Secondary attach, plain Postgres (not DuckLake): read-only view onto
+      # Debezium's JDBC-sink landing tables (warehouse.raw_cdc.<table> — see
+      # debezium-server-conf/application.properties). This is what
+      # models/sources.yml's `ehr` source resolves against — the append-only
+      # raw CDC event log, same role the raw Iceberg tables used to play.
+      attach:
+        - path: "ducklake:postgres:dbname={{ env_var('DUCKLAKE_CATALOG_DB', 'warehouse') }} host={{ env_var('DUCKLAKE_CATALOG_HOST', 'localhost') }} port={{ env_var('DUCKLAKE_CATALOG_PORT', '5433') }} user={{ env_var('DUCKLAKE_CATALOG_USER', 'testuser') }} password={{ env_var('DUCKLAKE_CATALOG_PASSWORD', 'testpass') }}"
+          alias: lake
+          is_ducklake: true
+          options:
+            data_path: "'{{ env_var('DUCKLAKE_DATA_PATH', '/tmp/ducklake_data') }}/'"
+        - path: "dbname={{ env_var('RAW_CDC_DB', 'warehouse') }} host={{ env_var('RAW_CDC_HOST', 'localhost') }} port={{ env_var('RAW_CDC_PORT', '5433') }} user={{ env_var('RAW_CDC_USER', 'testuser') }} password={{ env_var('RAW_CDC_PASSWORD', 'testpass') }}"
+          alias: raw
+          options:
+            type: postgres
+            read_only: true
+      # Registers hmac_sha256_hex(key, msg) as a callable SQL function (see
+      # duckdb_plugins/lineage_udfs.py) — DuckDB has sha256() but no
+      # built-in keyed HMAC, unlike Trino. Computing it in a Python UDF
+      # rather than inline SQL is also a real security improvement over the
+      # previous (Trino) design: the HMAC_KEY only ever gets read from the
+      # environment inside this Python function — it never gets templated
+      # into compiled SQL text, closing the exact "key can leak into query
+      # logs" limitation docs/lineage_token_rotation.md documented for the
+      # Trino version. See warehouse/macros/lineage.sql.
+      module_paths:
+        - duckdb_plugins
+      plugins:
+        - module: lineage_udfs
+      schema: gold
+      # threads: 1, NOT dbt's usual default of 4 or more: a real
+      # e2e-pipeline.yml run (33268516850) segfaulted (exit 139, no dbt-level
+      # error at all - a native crash) the first time this pipeline ever ran
+      # `dbt run` across bronze + silver + quality + gold models together in
+      # one invocation, which is also the first time it exercised more than
+      # one thread concurrently writing to the DuckLake catalog. Could not
+      # reproduce locally against a plain (non-DuckLake) DuckDB file with an
+      # equivalent multi-model, multi-thread incremental workload - ran it
+      # repeatedly, no crash - which points at DuckLake's own concurrent-write
+      # handling specifically, not dbt-duckdb's incremental materialization in
+      # general. Consistent with a confirmed, currently-open upstream report
+      # (duckdb/ducklake#233): concurrent writes to a DuckLake catalog are
+      # documented as unreliable today. Serializing to one thread avoids any
+      # concurrent DuckLake write in this pipeline entirely; the dataset here
+      # is synthetic test fixtures, so the lost parallelism costs nothing
+      # that matters. Revisit once ducklake#233 is resolved upstream.
       threads: 1

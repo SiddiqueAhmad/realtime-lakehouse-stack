@@ -12,8 +12,9 @@ purposes).
 
 1. Run a normal batch and let it fully process (per scenario 10, step 1–2).
 2. Re-run the same raw INSERT statements used in scenario 03
-   (`03_out_of_order_replay.sql`) directly against the Iceberg CDC table
-   — this simulates Debezium redelivering events it already sent once.
+   (`03_out_of_order_replay.sql`) directly against the raw_cdc landing
+   table — this simulates Debezium redelivering events it already sent
+   once.
 3. Run `dbt run --select br_lab_results sl_lab_results --profiles-dir .`.
 
 ## Expected

@@ -19,6 +19,6 @@ VALUES (2, 2, '2823-3', 'Potassium', 55.0, 'mmol/L', 'HH', now());
 -- 'result_out_of_range'; the row appears in quarantine_lab_results, not
 -- trusted_lab_results.
 --
--- VERIFY (trino --server localhost:8080 --catalog iceberg):
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
 --   SELECT quality_status, failed_checks FROM silver.sl_lab_results WHERE result_value = 55.0;
 --   -- quality_status = 'FAIL', failed_checks contains 'result_out_of_range'

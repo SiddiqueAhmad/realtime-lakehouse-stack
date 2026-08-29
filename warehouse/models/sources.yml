@@ -3,19 +3,23 @@ version: 2
 sources:
   - name: ehr
     description: >
-      Raw CDC events landed by Debezium into Iceberg. One row per change
-      event (insert/update/delete), immutable — this is the append-only
-      history the reliability layer (models/bronze) reads from. See
+      Raw CDC events landed by Debezium's JDBC sink into Postgres
+      (warehouse.raw_cdc.<table> — see
+      infra-setup/debezium-server-conf/application.properties). One row per
+      change event (insert/update/delete), immutable — this is the
+      append-only history the reliability layer (models/bronze) reads from.
+      DuckDB reads this cross-engine via the postgres extension (see
+      warehouse/profiles.yml's `raw` attach). See
       governance/phi_classification.yml for column-level sensitivity.
-    database: iceberg
-    schema: icebergdata
+    database: raw
+    schema: raw_cdc
     tables:
-      - name: debeziumcdc_dbz__ehr_patients
-      - name: debeziumcdc_dbz__ehr_providers
-      - name: debeziumcdc_dbz__ehr_facilities
-      - name: debeziumcdc_dbz__ehr_encounters
-      - name: debeziumcdc_dbz__ehr_diagnoses
-      - name: debeziumcdc_dbz__ehr_procedures
-      - name: debeziumcdc_dbz__ehr_medications
-      - name: debeziumcdc_dbz__ehr_lab_results
-      - name: debeziumcdc_dbz__ehr_observations
+      - name: patients
+      - name: providers
+      - name: facilities
+      - name: encounters
+      - name: diagnoses
+      - name: procedures
+      - name: medications
+      - name: lab_results
+      - name: observations

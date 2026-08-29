@@ -21,6 +21,18 @@
     __transaction_data_collection_order  this event's position within just
                                        this table, inside the transaction
 
+  (An earlier version of this comment claimed transaction.data_collection_order
+  had to be dropped because Debezium represents it as a STRUCT the JDBC sink
+  can't flatten. That diagnosis was wrong - confirmed by reproducing a real
+  streamed UPDATE locally against the actual debezium-server-dist runner jar
+  and a live Postgres, once with the field present and once without: the
+  error persisted with it removed, and disappeared once it was restored
+  alongside the actual fix - filtering the separate `dbz.transaction` topic
+  out of the transform chain (see application.properties' dropTx/
+  isTxMetadata predicate) rather than letting it reach the JDBC sink
+  unrouted. With that in place, __transaction_data_collection_order comes
+  through as a plain integer per event, exactly as documented above.)
+
   Why LSN, not the commit timestamp, for ORDERING: __source_ts_ns is a
   transaction commit timestamp, and Postgres commits are only timestamped
   once per transaction — two updates to the same row inside one transaction
@@ -38,12 +50,15 @@
   of that identity, not just its position in the WAL. See
   generate_source_event_id.
 
-  The raw Iceberg table this reads from is an append-only event log
-  (debezium.sink.iceberg.upsert=false) — every change event is preserved,
-  not just the latest per key — so replay/audit/forensic lineage work off
-  the actual CDC history, not a current-state projection that's already lost
-  it. cdc_reliable_select() is what turns that at-least-once, unbounded
-  event log into "the current state of each row", handling:
+  The raw Postgres table this reads from (warehouse.raw_cdc.<table>,
+  written by Debezium's JDBC sink — see
+  infra-setup/debezium-server-conf/application.properties) is an
+  append-only event log (insert.mode=insert, primary.key.mode=none) —
+  every change event is preserved, not just the latest per key — so
+  replay/audit/forensic lineage work off the actual CDC history, not a
+  current-state projection that's already lost it. cdc_reliable_select() is
+  what turns that at-least-once, unbounded event log into "the current
+  state of each row", handling:
 
     - idempotency / deduplication: collapse multiple events for the same key
       within a batch down to the newest one (by LSN), so replaying a batch
@@ -56,10 +71,16 @@
       removal, so downstream consumers and auditors can still answer "what
       happened to this record and when", instead of the row just vanishing.
 
-  Combined with materialized='incremental' + incremental_strategy='merge' and
-  unique_key=<natural key>, this makes each dbt run of a bronze model
-  idempotent: reprocessing the same CDC offset range twice converges to the
-  same table state instead of drifting.
+  Combined with materialized='incremental' + incremental_strategy='delete+insert'
+  (NOT 'merge' - dbt-duckdb doesn't support it, confirmed by its own adapter
+  code and by a real run failing "The incremental strategy 'merge' is not
+  valid for this adapter" the first time a bronze model was actually
+  re-run incrementally) and unique_key=<natural key>, this makes each dbt
+  run of a bronze model idempotent: reprocessing the same CDC offset range
+  twice converges to the same table state instead of drifting. delete+insert
+  is a real upsert here, not an approximation, precisely because the
+  dedup CTE above already guarantees at most one row per natural key in
+  any incremental batch.
 
   Lineage (record_token / source_event_id / pipeline_run_id — see
   macros/lineage.sql) is computed once, here, at ingestion into the current-

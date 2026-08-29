@@ -21,13 +21,16 @@ INVENTORY_DB_USER = os.getenv("INVENTORY_DB_USER", "testuser")
 INVENTORY_DB_PASS = os.getenv("INVENTORY_DB_PASS", "testpass")
 INVENTORY_DB_DBNAME = os.getenv("INVENTORY_DB_DBNAME", "ehr")
 
-# Trino DB Details
-TRINO_DB_NAME = "Trino Iceberg"
-TRINO_DB_HOST = os.getenv("TRINO_DB_HOST", "../trino")
-TRINO_DB_PORT = int(os.getenv("TRINO_DB_PORT", 8080))
-TRINO_DB_USER = os.getenv("TRINO_DB_USER", "admin") # Default Trino user
-TRINO_DB_CATALOG = os.getenv("TRINO_DB_CATALOG", "iceberg")
-TRINO_DB_SCHEMA = os.getenv("TRINO_DB_SCHEMA", "icebergdata")
+# NOTE: this used to also register a Trino connection (bronze/silver/gold
+# lived behind Trino's Iceberg catalog). Since the DuckDB/DuckLake migration
+# (see README's architecture section) there's no long-running query server
+# for the warehouse layer to point Metabase at — DuckDB is an embedded,
+# single-process engine, and Metabase has no first-party DuckDB driver (a
+# community JDBC plugin exists but isn't packaged here). Wiring Metabase up
+# to gold/deid is a known gap of this migration, not something silently
+# dropped — see governance/phi_classification.yml's KNOWN GAP note for the
+# access-control side of the same gap. Until it's closed, querying gold.*
+# means running `infra-setup/scripts/dq.py` directly (see README).
 
 def wait_for_metabase():
     """Waits for the Metabase API to be available."""
@@ -144,22 +147,8 @@ if __name__ == "__main__":
     }
     add_database(session_id, postgres_payload)
 
-    # --- Add Trino Database ---
-    trino_payload = {
-        "engine": "starburst",  # Use the starburst driver which is used for Trino
-        "name": TRINO_DB_NAME,
-        "details": {
-            "host": TRINO_DB_HOST,
-            "port": TRINO_DB_PORT,
-            "user": TRINO_DB_USER,
-            "catalog": TRINO_DB_CATALOG,
-            "schema": TRINO_DB_SCHEMA, # Add schema for context
-            "ssl": False
-        },
-        "is_on_demand": False,
-        "is_full_sync": True,
-        "schedules": {}
-    }
-    add_database(session_id, trino_payload)
+    # No second database is registered here anymore — see the module-level
+    # NOTE above for why (no DuckDB driver, no long-running warehouse server
+    # to connect Metabase to since the DuckDB/DuckLake migration).
 
     print("🎉 Metabase setup and datasource configuration complete!")

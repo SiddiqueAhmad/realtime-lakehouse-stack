@@ -10,20 +10,23 @@
 -- its key, and critically it's redelivered across two separate merges, not
 -- deduplicated for free within one micro-batch.
 --
--- We reproduce exact redelivery against the raw Iceberg CDC table Debezium
--- writes to (a real redelivery from Debezium can't be triggered on demand
--- from outside it).
+-- We reproduce exact redelivery against warehouse.raw_cdc.patients — the
+-- append-only landing table Debezium's JDBC sink writes into (see
+-- infra-setup/debezium-server-conf/application.properties). A real
+-- redelivery from Debezium can't be triggered on demand from outside it,
+-- so this writes what Debezium itself would have written, directly.
 --
--- Run: trino --server localhost:8080 --catalog iceberg -f 01_duplicate_event.sql
+-- Run: psql -h localhost -p 5433 -U testuser -d warehouse -f 01_duplicate_event.sql
 --
--- (created_at/updated_at/__transaction_* are omitted below for the same
--- reason as scenario 03.)
+-- (created_at/updated_at/__transaction_* are omitted below — the JDBC
+-- sink's schema.evolution=basic makes them optional columns, and this
+-- scenario doesn't need them.)
 
 -- 1. First delivery of the event (fixed LSN 900000010).
-INSERT INTO icebergdata.debeziumcdc_dbz__ehr_patients
+INSERT INTO raw_cdc.patients
     (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morgan.sample+updated@synthetic.test', '555-010-0002', '2 Synthetic Way', 'Springfield', 'IL', '62701', false,
-        'u', 'patients', CAST(to_unixtime(TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
+        'u', 'patients', CAST(extract(epoch from TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
 
 -- Then: cd warehouse && ../.venv/bin/dbt run --select br_patients sl_patients --profiles-dir .
 
@@ -32,10 +35,10 @@ VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morg
 --    This is the scenario under test: not same-batch dedup (which
 --    cdc_reliable_select's row_number() already handles trivially), but
 --    idempotency ACROSS two merges of the identical event.
-INSERT INTO icebergdata.debeziumcdc_dbz__ehr_patients
+INSERT INTO raw_cdc.patients
     (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morgan.sample+updated@synthetic.test', '555-010-0002', '2 Synthetic Way', 'Springfield', 'IL', '62701', false,
-        'u', 'patients', CAST(to_unixtime(TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
+        'u', 'patients', CAST(extract(epoch from TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
 -- (Both INSERTs land in the append-only raw log — that's expected and
 -- correct: the raw layer keeps every delivery, redeliveries included. It's
 -- bronze's job to converge them to one effect.)
@@ -49,15 +52,15 @@ VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morg
 -- cdc_reliable_select's incremental merge guard) — not a second row and not
 -- an error.
 --
--- VERIFY (trino --server localhost:8080 --catalog iceberg):
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
 --   SELECT count(*) AS row_count, max_by(email, cdc_source_lsn) AS latest_email
 --   FROM bronze.br_patients
 --   WHERE patient_id = 2;
 --   -- row_count = 1, latest_email = 'morgan.sample+updated@synthetic.test'
 --
 -- Also worth checking directly against the raw log, to confirm the
--- distinction this scenario is making — the append-only layer really does
--- have 2 rows for this LSN (3, counting the original snapshot row for
--- patient 2), while bronze (post-reliability-engine) has exactly 1:
---   SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE patient_id = 2 AND __source_lsn = 900000010;
+-- distinction this scenario is making — the append-only landing table
+-- really does have 2 rows for this LSN (3, counting the original snapshot
+-- row for patient 2), while bronze (post-reliability-engine) has exactly 1:
+--   SELECT count(*) FROM raw.raw_cdc.patients WHERE patient_id = 2 AND __source_lsn = 900000010;
 --   -- 2

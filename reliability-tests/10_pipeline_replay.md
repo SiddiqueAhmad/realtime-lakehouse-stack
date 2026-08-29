@@ -23,6 +23,6 @@
   per run. Row counts, `quality_status`, and clinical values must be
   identical to step 2 — a plain re-run must be a no-op on the data.
 - This works because `cdc_reliable_select`'s merge is keyed by natural key,
-  and because Iceberg's REST catalog + `incremental_strategy='merge'` make
-  the operation itself idempotent: re-merging the same rows converges rather
-  than duplicating or drifting.
+  and because DuckLake's transactional catalog + `incremental_strategy='merge'`
+  make the operation itself idempotent: re-merging the same rows converges
+  rather than duplicating or drifting.

@@ -1,0 +1,62 @@
+-- Scenario 13: Corrected referential integrity (quarantine -> trusted
+-- transition)
+--
+-- Follow-up to scenario 5: that scenario quarantines diagnosis_id=9002
+-- because it references patient_id=999999, which doesn't exist yet. Here we
+-- land the missing patient — the real-world fix for that exact incident
+-- (a downstream delete, a broken upstream load, a disabled constraint
+-- during a bulk import, or just a late-arriving batch) — and re-run the
+-- pipeline. diagnosis_id=9002 should flip from quarantined to trusted
+-- without ever changing its own row: only the referenced patient existing
+-- makes the patient_not_found check pass now.
+--
+-- This is what gold.record_lineage (current-state) and gold.record_lineage_event
+-- (historical ledger) exist to demonstrate the difference between:
+-- record_lineage will show only the *current* trusted outcome once this
+-- runs; record_lineage_event should retain BOTH the original quarantine
+-- decision (logged when scenario 5's dbt run computed it) and this new
+-- trusted decision (logged when *this* scenario's dbt run recomputes it) —
+-- the actual "what happened, and when" this ledger is for.
+--
+-- Prerequisite: scenario 5 (05_invalid_patient_reference.sql) has already
+-- run, including its own dbt run, so record_lineage_event has already
+-- logged the quarantine decision for diagnosis_id=9002's record_token.
+--
+-- Run: psql -h localhost -p 5433 -U testuser -d warehouse -f 13_quarantine_correction.sql
+--
+-- (created_at/updated_at/__transaction_* are omitted below for the same
+-- reason as scenario 03; __source_lsn must be set for the same reason as
+-- scenario 05.)
+
+INSERT INTO raw_cdc.patients
+    (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
+VALUES (999999, 'MRN-SYN-999999', 'Synthetic', 'LateArrival', DATE '1980-01-01', 'unknown', NULL, NULL, NULL, NULL, NULL, NULL, false,
+        'c', 'patients', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:05:00') * 1e9 AS BIGINT), 900000004, 'ehr');
+
+-- Then:
+--   cd warehouse && ../.venv/bin/dbt run \
+--     --select br_patients sl_patients trusted_patients quarantine_patients \
+--              br_diagnoses sl_diagnoses trusted_diagnoses quarantine_diagnoses \
+--              record_lineage record_lineage_event \
+--     --profiles-dir .
+--
+-- EXPECTED: diagnosis_id=9002 now passes patient_not_found (its patient
+-- exists), moves from quarantine_diagnoses to trusted_diagnoses, and
+-- gold.record_lineage_event has (at least) two rows for its record_token:
+-- one from scenario 5's run (quality_status=FAIL, is_quarantined=true) and
+-- one from this run (quality_status=PASS, is_trusted=true) — the
+-- before/after this scenario exists to prove record_lineage alone can't
+-- show, since it only ever holds the latest row.
+--
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
+--   SELECT quality_status, failed_checks FROM silver.sl_diagnoses WHERE diagnosis_id = 9002;
+--   -- quality_status = 'PASS', failed_checks = NULL (or empty)
+--   SELECT count(*) FROM quality.trusted_diagnoses WHERE diagnosis_id = 9002;
+--   -- 1
+--   SELECT count(*) FROM quality.quarantine_diagnoses WHERE diagnosis_id = 9002;
+--   -- 0
+--   SELECT quality_status, is_trusted, is_quarantined, logged_at
+--   FROM gold.record_lineage_event
+--   WHERE record_token = (SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002)
+--   ORDER BY logged_at;
+--   -- 2 rows: FAIL/false/true (scenario 5's run) then PASS/true/false (this run)
