@@ -73,20 +73,24 @@ It does **not** automate the actual reliability/quality guarantees those
 scenarios exist to exercise — dedup, per-key ordering, the quarantine split,
 lineage token generation — because those are properties of the
 bronze/silver/quality dbt layers running against a live Debezium → Iceberg →
-Trino pipeline, which this workflow doesn't stand up. Nor does it cover
-scenarios 01, 05, 08 (need Trino) or the operational runbooks 10–12 (need
-the full `docker compose` stack).
+Trino pipeline, which this workflow doesn't stand up. Nor does it cover the
+operational runbooks 10–12 (need the full `docker compose` stack, but not
+scripted end-to-end even there yet).
 
-`.github/workflows/e2e-pipeline.yml` covers that gap for scenarios 01 and 02:
-it runs the actual `docker compose up` stack (Postgres → Debezium → Iceberg →
-dbt → Trino), runs `dbt run` for real, and asserts both scenarios' outcomes
-by querying `bronze.br_patients`/`bronze.br_encounters` through Trino —
-proving the reliability engine, not just the source write. It's **not wired
+`.github/workflows/e2e-pipeline.yml` covers that gap for scenarios 01–08: it
+runs the actual `docker compose up` stack (Postgres → Debezium → Iceberg →
+dbt → Trino), runs `dbt run` for real, and asserts every scenario's outcome
+by querying bronze/silver/quality tables through Trino — including, for
+scenario 08, enabling `infra-setup/trino/rules.json` for the whole job and
+running real queries as each of the 4 governed roles
+(`analyst_*`/`data_engineer_*`/`clinical_user_*`) to confirm access is
+allowed or denied as documented, which is the first time that opt-in feature
+gets exercised at all rather than just eyeballed as JSON. It's **not wired
 to run on every PR** (only `workflow_dispatch` and a nightly schedule):
 standing up MinIO, Lakekeeper, Postgres, Debezium, and Trino from cold is
 slow and has more failure surface than the fast Postgres-only job above, and
 — since this sandbox has no Docker daemon — it was written and reviewed but
 **could not actually be executed here**. Treat its first few real runs as
-shakeout, and promote it to a required PR check (and extend it to scenarios
-03/04/05 — out-of-order and quarantine) once it's demonstrated stable,
-rather than trusting it blind because it parses.
+shakeout, and promote it to a required PR check (and extend it to the
+10–12 runbooks) once it's demonstrated stable, rather than trusting it
+blind because it parses.
