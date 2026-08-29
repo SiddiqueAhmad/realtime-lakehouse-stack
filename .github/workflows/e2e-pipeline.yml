@@ -106,19 +106,42 @@ jobs:
       - name: Wait for Debezium's initial snapshot to land in raw_cdc
         # 4 seed patients (see infra-setup/timescale/healthcare.sql) is the
         # known-good row count for a clean start.
+        #
+        # Piping dq.py through `tail -n1` swallows its exit code (the
+        # pipeline's status is tail's, not python's) - a genuine dq.py
+        # failure (e.g. raw_cdc.patients doesn't exist yet - the JDBC sink
+        # hasn't created it, or errored) would otherwise silently read as
+        # "0 rows" forever instead of surfacing. Capture stdout/stderr to
+        # files instead so a real failure is visible, not masked.
         run: |
           for i in $(seq 1 60); do
-            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            .venv/bin/python3 infra-setup/scripts/dq.py \
                   "SELECT count(*) FROM raw.raw_cdc.patients" \
-                  2>/dev/null | tail -n1 || echo 0)
-            if [ "${n:-0}" -ge "4" ] 2>/dev/null; then
+                  > /tmp/dq_out.log 2> /tmp/dq_err.log
+            rc=$?
+            n=$(tail -n1 /tmp/dq_out.log)
+            if [ $rc -eq 0 ] && [ "${n:-0}" -ge "4" ] 2>/dev/null; then
               echo "snapshot landed ($n rows)"
               exit 0
             fi
-            echo "waiting for CDC snapshot... ($i/60, currently $n rows)"
+            if [ $rc -ne 0 ]; then
+              echo "dq.py failed ($i/60), retrying:"
+              cat /tmp/dq_err.log
+            else
+              echo "waiting for CDC snapshot... ($i/60, currently $n rows)"
+            fi
             sleep 10
           done
           echo "::error::Debezium's initial snapshot did not land in time"
+          echo "::group::final dq.py error"
+          cat /tmp/dq_err.log
+          echo "::endgroup::"
+          echo "::group::docker compose logs debezium"
+          ( cd infra-setup && docker compose logs --no-color debezium ) || true
+          echo "::endgroup::"
+          echo "::group::docker compose logs db"
+          ( cd infra-setup && docker compose logs --no-color db ) || true
+          echo "::endgroup::"
           exit 1
 
       - name: dbt seed + run + test
