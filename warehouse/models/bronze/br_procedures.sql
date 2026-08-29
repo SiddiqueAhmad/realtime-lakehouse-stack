@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as procedure_id,
+    procedure_id,
     encounter_id,
     patient_id,
     cpt_code,

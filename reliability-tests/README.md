@@ -85,7 +85,13 @@ scenario 08, enabling `infra-setup/trino/rules.json` for the whole job and
 running real queries as each of the 4 governed roles
 (`analyst_*`/`data_engineer_*`/`clinical_user_*`) to confirm access is
 allowed or denied as documented, which is the first time that opt-in feature
-gets exercised at all rather than just eyeballed as JSON. It's **not wired
+gets exercised at all rather than just eyeballed as JSON. `RECORD_TOKEN_HMAC_KEY`
+is generated fresh per run (`openssl rand -hex 32`) rather than using the
+insecure dev fallback documented in `warehouse/macros/lineage.sql`, and no
+production secret of any kind is used — every other credential is the
+synthetic stack's own hardcoded dev value. On failure, every service's logs
+(plus dbt's own) are uploaded as a build artifact, not left to scroll off
+the console. It's **not wired
 to run on every PR** (only `workflow_dispatch` and a nightly schedule):
 standing up MinIO, Lakekeeper, Postgres, Debezium, and Trino from cold is
 slow and has more failure surface than the fast Postgres-only job above, and

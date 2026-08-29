@@ -21,7 +21,7 @@
 
 -- 1. First delivery of the event (fixed LSN 900000010).
 INSERT INTO icebergdata.debeziumcdc_dbz__ehr_patients
-    (id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
+    (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morgan.sample+updated@synthetic.test', '555-010-0002', '2 Synthetic Way', 'Springfield', 'IL', '62701', false,
         'u', 'patients', CAST(to_unixtime(TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
 
@@ -33,7 +33,7 @@ VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morg
 --    cdc_reliable_select's row_number() already handles trivially), but
 --    idempotency ACROSS two merges of the identical event.
 INSERT INTO icebergdata.debeziumcdc_dbz__ehr_patients
-    (id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
+    (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morgan.sample+updated@synthetic.test', '555-010-0002', '2 Synthetic Way', 'Springfield', 'IL', '62701', false,
         'u', 'patients', CAST(to_unixtime(TIMESTAMP '2026-03-02 09:00:00') * 1e9 AS BIGINT), 900000010, 'ehr');
 -- (Both INSERTs land in the append-only raw log — that's expected and
@@ -59,5 +59,5 @@ VALUES (2, 'MRN-SYN-00002', 'Morgan', 'Sample', DATE '1972-11-02', 'male', 'morg
 -- distinction this scenario is making — the append-only layer really does
 -- have 2 rows for this LSN (3, counting the original snapshot row for
 -- patient 2), while bronze (post-reliability-engine) has exactly 1:
---   SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 2 AND __source_lsn = 900000010;
+--   SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE patient_id = 2 AND __source_lsn = 900000010;
 --   -- 2

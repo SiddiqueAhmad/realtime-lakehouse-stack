@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as lab_result_id,
+    lab_result_id,
     patient_id,
     encounter_id,
     loinc_code,

@@ -14,6 +14,13 @@ name: E2E pipeline reliability (best-effort)
 # authored it (no Docker daemon available there — see reliability-tests/README.md);
 # treat its first few real runs as shakeout, not as already-proven, and
 # promote it to a required PR check once it's demonstrated stable.
+#
+# No production secret of any kind is used here: RECORD_TOKEN_HMAC_KEY is
+# generated fresh per run (openssl rand), and every other credential is the
+# synthetic stack's own hardcoded dev value (testuser/testpass, MinIO
+# admin/password, ...), matching infra-setup/docker-compose.yml. On failure,
+# every service's logs (plus dbt's own log) are uploaded as a build
+# artifact rather than left to scroll off the console.
 
 on:
   workflow_dispatch:
@@ -38,6 +45,14 @@ jobs:
             https://repo1.maven.org/maven2/io/trino/trino-cli/442/trino-cli-442-executable.jar
           chmod +x /usr/local/bin/trino
 
+      - name: Generate a CI-only lineage HMAC key
+        # Real RECORD_TOKEN_HMAC_KEY, generated fresh per run and never
+        # logged or persisted — not the insecure dev fallback documented in
+        # warehouse/macros/lineage.sql. Written to $GITHUB_ENV so every
+        # later step (dbt run, dbt test) picks it up automatically. No
+        # production secret of any kind is used anywhere in this workflow.
+        run: echo "RECORD_TOKEN_HMAC_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Enable minimum-necessary access control (scenario 08)
         # Turning this on from the start (rather than isolating it to the
         # scenario 08 step) is safe for scenarios 01-07: every query in this
@@ -53,6 +68,19 @@ jobs:
       - name: Start the stack
         working-directory: infra-setup
         run: docker compose up -d
+
+      - name: Wait for Postgres to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if PGPASSWORD=testpass pg_isready -h localhost -p 5433 -U testuser -d ehr > /dev/null 2>&1; then
+              echo "Postgres is up"
+              exit 0
+            fi
+            echo "waiting for Postgres... ($i/30)"
+            sleep 3
+          done
+          echo "::error::Postgres did not become ready in time"
+          exit 1
 
       - name: Wait for Trino to accept queries
         run: |
@@ -126,11 +154,11 @@ jobs:
           for i in $(seq 1 30); do
             patients_n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 1" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE patient_id = 1" \
                   2>/dev/null | tail -n1 || echo 0)
             encounters_n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE id = 2" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE encounter_id = 2" \
                   2>/dev/null | tail -n1 || echo 0)
             # 1 snapshot row + 2 UPDATE events each.
             if [ "${patients_n:-0}" -ge "3" ] 2>/dev/null && [ "${encounters_n:-0}" -ge "3" ] 2>/dev/null; then
@@ -195,7 +223,7 @@ jobs:
           for i in $(seq 1 30); do
             n=$(trino --server http://localhost:8080 --catalog iceberg \
                   --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_diagnoses WHERE id = 3 AND __op = 'd'" \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_diagnoses WHERE diagnosis_id = 3 AND __op = 'd'" \
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "1" ] 2>/dev/null; then
               echo "delete event landed"
@@ -358,10 +386,101 @@ jobs:
 
           echo "Scenario 08 passed: minimum-necessary access control enforced as documented in governance/phi_classification.yml."
 
-      - name: Dump service logs on failure
+      - name: Rebuild the gold observability models against final state
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --select gold --profiles-dir .
+
+      - name: Assert observability models have sane shape AND correct values
+        # Row-count-only assertions ("9 rows exist") would pass even if
+        # every metric column were NULL or nonsensical — they prove the
+        # models were created, not that they're right. These check actual
+        # values, including some tied to specific scenarios already run
+        # above, so a regression in the metric logic itself gets caught.
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          lt100() { awk -v v="$1" 'BEGIN{ exit !(v + 0 < 100) }'; }
+
+          for tbl in gold.cdc_freshness gold.cdc_volume_summary gold.current_quality_summary; do
+            n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM $tbl" 2>/dev/null | tail -n1)
+            [ "${n:-0}" = "9" ] || fail "$tbl: expected 9 dataset rows (one per bronze entity), got $n"
+          done
+          echo "shape OK: cdc_freshness, cdc_volume_summary, current_quality_summary each have 9 dataset rows"
+
+          # cdc_freshness: lag/staleness must be non-negative for every
+          # dataset - a negative value means a clock or join bug, not a
+          # real reading.
+          bad_freshness=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.cdc_freshness WHERE cdc_lag_seconds < 0 OR staleness_seconds < 0" 2>/dev/null | tail -n1)
+          [ "${bad_freshness:-1}" = "0" ] || fail "cdc_freshness: $bad_freshness dataset(s) have negative lag/staleness"
+          echo "cdc_freshness OK: lag and staleness are non-negative for every dataset"
+
+          # cdc_volume_summary: raw events can never be fewer than current
+          # rows (every current row descends from at least one raw event).
+          # And scenario 01 (reliability-tests/01_duplicate_event.sql)
+          # redelivered patient_id=2's identical event at the same LSN
+          # twice, so patients must show at least 1 real duplicate.
+          bad_volume=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.cdc_volume_summary WHERE raw_event_count < current_row_count" 2>/dev/null | tail -n1)
+          [ "${bad_volume:-1}" = "0" ] || fail "cdc_volume_summary: $bad_volume dataset(s) have raw_event_count < current_row_count"
+          patients_dup=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT duplicate_event_count FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
+          [ "${patients_dup:-0}" -ge "1" ] 2>/dev/null || fail "cdc_volume_summary: expected patients.duplicate_event_count >= 1 (scenario 01's redelivery), got $patients_dup"
+          # The four rates are defined to sum to ~100% (see the model's own
+          # docstring) - verify that's actually true for one real row,
+          # rather than just trusting the arithmetic by inspection.
+          patients_rate_sum=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT duplicate_rate_pct + insert_rate_pct + update_rate_pct + delete_rate_pct FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
+          awk -v v="${patients_rate_sum:-0}" 'BEGIN{ if (v < 99.5 || v > 100.5) exit 1 }' \
+            || fail "cdc_volume_summary: expected the 4 rate columns to sum to ~100% for patients, got $patients_rate_sum"
+          echo "cdc_volume_summary OK: raw >= current everywhere, scenario 01's redelivery shows up as a real duplicate, and the 4 rates sum to ~100%"
+
+          # current_quality_summary: pass rate must be a valid percentage
+          # everywhere, and diagnoses/lab_results specifically must be
+          # BELOW 100% - scenarios 05/06/07 put real FAIL rows into their
+          # current population.
+          bad_passrate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.current_quality_summary WHERE current_pass_rate_pct < 0 OR current_pass_rate_pct > 100" 2>/dev/null | tail -n1)
+          [ "${bad_passrate:-1}" = "0" ] || fail "current_quality_summary: $bad_passrate dataset(s) have an out-of-range pass rate"
+          diagnoses_rate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'diagnoses'" 2>/dev/null | tail -n1)
+          lab_rate=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'lab_results'" 2>/dev/null | tail -n1)
+          lt100 "${diagnoses_rate:-100}" || fail "current_quality_summary: expected diagnoses pass rate < 100% (scenario 05's quarantined row), got $diagnoses_rate"
+          lt100 "${lab_rate:-100}"       || fail "current_quality_summary: expected lab_results pass rate < 100% (scenarios 06+07's quarantined rows), got $lab_rate"
+          echo "current_quality_summary OK: valid percentages, and the real quarantined rows from scenarios 05-07 show up"
+
+          echo "Observability models validated on actual values, not just row-count shape."
+
+      - name: Collect diagnostics on failure
+        # A bare "job failed" with no logs is useless for triaging a
+        # multi-service pipeline. Every service's log, plus dbt's own log,
+        # goes to an uploaded artifact — not just workflow console output,
+        # which is easy to miss and gets truncated.
         if: failure()
-        working-directory: infra-setup
-        run: docker compose logs --tail=200
+        run: |
+          mkdir -p artifacts
+          ( cd infra-setup && docker compose logs --no-color ) > artifacts/docker-compose-all.log 2>&1 || true
+          for svc in db debezium-iceberg trino lakekeeper minio metabase; do
+            ( cd infra-setup && docker compose logs --no-color "$svc" ) > "artifacts/${svc}.log" 2>&1 || true
+          done
+          cp warehouse/logs/dbt.log artifacts/dbt.log 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Tear down
         if: always()

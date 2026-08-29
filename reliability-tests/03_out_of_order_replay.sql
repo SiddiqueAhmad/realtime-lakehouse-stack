@@ -19,7 +19,7 @@
 
 -- 1. The "current" (higher-LSN, i.e. newer) event: potassium result of 4.2.
 INSERT INTO icebergdata.debeziumcdc_dbz__ehr_lab_results
-    (id, patient_id, encounter_id, loinc_code, test_name, result_value, unit, abnormal_flag, result_at, __op, __table, __source_ts_ns, __source_lsn, __db)
+    (lab_result_id, patient_id, encounter_id, loinc_code, test_name, result_value, unit, abnormal_flag, result_at, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (9001, 2, 2, '2823-3', 'Potassium', 4.2, 'mmol/L', 'N', TIMESTAMP '2026-03-01 08:00:00',
         'u', 'lab_results', CAST(to_unixtime(TIMESTAMP '2026-03-01 08:00:00') * 1e9 AS BIGINT), 900000002, 'ehr');
 
@@ -30,7 +30,7 @@ VALUES (9001, 2, 2, '2823-3', 'Potassium', 4.2, 'mmol/L', 'N', TIMESTAMP '2026-0
 --    even though it's being delivered after it. This is the scenario
 --    under test.
 INSERT INTO icebergdata.debeziumcdc_dbz__ehr_lab_results
-    (id, patient_id, encounter_id, loinc_code, test_name, result_value, unit, abnormal_flag, result_at, __op, __table, __source_ts_ns, __source_lsn, __db)
+    (lab_result_id, patient_id, encounter_id, loinc_code, test_name, result_value, unit, abnormal_flag, result_at, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (9001, 2, 2, '2823-3', 'Potassium', 3.9, 'mmol/L', 'N', TIMESTAMP '2026-03-01 07:00:00',
         'u', 'lab_results', CAST(to_unixtime(TIMESTAMP '2026-03-01 07:00:00') * 1e9 AS BIGINT), 900000001, 'ehr');
 

@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as provider_id,
+    provider_id,
     npi,
     first_name,
     last_name,

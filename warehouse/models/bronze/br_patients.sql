@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as patient_id,
+    patient_id,
     medical_record_number,
     first_name,
     last_name,

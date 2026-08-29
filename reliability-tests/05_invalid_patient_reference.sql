@@ -17,7 +17,7 @@
 -- opposite of what this scenario needs to demonstrate.)
 
 INSERT INTO icebergdata.debeziumcdc_dbz__ehr_diagnoses
-    (id, encounter_id, patient_id, icd10_code, description, diagnosed_at, __op, __table, __source_ts_ns, __source_lsn, __db)
+    (diagnosis_id, encounter_id, patient_id, icd10_code, description, diagnosed_at, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (9002, 1, 999999, 'Z00.00', 'Encounter for general adult medical examination',
         TIMESTAMP '2026-03-01 09:00:00', 'c', 'diagnoses',
         CAST(to_unixtime(TIMESTAMP '2026-03-01 09:00:00') * 1e9 AS BIGINT), 900000003, 'ehr');

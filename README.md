@@ -96,7 +96,25 @@ Seeded as synthetic data in `infra-setup/timescale/healthcare.sql`.
 | Silver | `warehouse/models/silver/` | Data quality gates → `quality_status` + `failed_checks` + lineage |
 | Quality | `warehouse/models/quality/` | `trusted_*` / `quarantine_*` split by `quality_status` |
 | De-identified | `warehouse/models/deid/` | Safe-Harbor-style transform of trusted data |
-| Gold | `warehouse/models/gold/` | Aggregate-only analytics + `data_quality_summary` observability rollup |
+| Gold | `warehouse/models/gold/` | Aggregate-only analytics + observability (freshness, CDC lag, volume, quality pass rate) |
+
+## 📈 Observability
+
+Four gold models answer "is the pipeline healthy?" without exposing any
+PHI-classified column — counts, timestamps, and run ids only. Each has a
+precise, deliberately-not-interchangeable definition (see each model's own
+docstring for the reasoning):
+
+| Model | Answers |
+|---|---|
+| `gold.cdc_freshness` | For the most-recently-processed event per dataset: how long did it take to land in bronze (`cdc_lag_seconds`), and how long ago was that (`staleness_seconds`)? Both measured from the same row, not two independently-maxed timestamps. |
+| `gold.cdc_volume_summary` | Raw CDC event volume split into unique vs. *duplicate* events (a literal redelivery — same natural key **and** LSN — not just "another update"), by operation type, against the current row count, plus each as a rate (`duplicate_rate_pct`/`insert_rate_pct`/`update_rate_pct`/`delete_rate_pct`, summing to ~100%). |
+| `gold.data_quality_summary` | Pass/fail record counts per dataset, **per pipeline run** — how did a specific run's batch look. |
+| `gold.current_quality_summary` | PASS rate per dataset, **right now** — computed directly off the live silver population, not by summing across runs. |
+
+These read `pipeline_run_id`/`cdc_source_ts_ns`/`_loaded_at` — already
+computed once per row by the reliability engine (`macros/cdc_reliability.sql`)
+— rather than adding a separate metrics-collection mechanism.
 
 ## 🔐 Governance & PHI
 

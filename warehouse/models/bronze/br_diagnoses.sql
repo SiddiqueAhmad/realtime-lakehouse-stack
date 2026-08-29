@@ -10,7 +10,7 @@
 }}
 
 {% set source_columns %}
-    id as diagnosis_id,
+    diagnosis_id,
     encounter_id,
     patient_id,
     icd10_code,
