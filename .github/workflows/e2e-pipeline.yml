@@ -462,20 +462,27 @@ jobs:
       - name: Assert record_lineage traces the scenario 05 incident end-to-end
         # Demonstrates the actual "why is this record in the state it's in"
         # investigation gold.record_lineage exists for: scenario 05
-        # (invalid_patient_reference) put exactly one diagnosis into
-        # quarantine. Trace it from CDC event through to that outcome using
-        # only record_token/operational metadata - no PHI value, no natural
-        # key - which is what makes this safe for the analyst/ai_agent tier.
+        # (invalid_patient_reference) put diagnosis_id=9002 into quarantine.
+        # Trace it from CDC event through to that outcome. We only use
+        # diagnosis_id here to look up *which* record_token to check - the
+        # same natural key already used by the scenario-05 assertion above
+        # - so the actual investigation query (the one on record_lineage)
+        # runs on record_token/operational metadata alone, no PHI value,
+        # which is what makes it safe for the analyst/ai_agent tier. Scoping
+        # to this one record_token (rather than counting/filtering the
+        # whole dataset) keeps the assertion about scenario 05's record
+        # specifically, not coupled to how many other rows happen to be
+        # quarantined dataset-wide.
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          n=$(trino --server http://localhost:8080 --catalog iceberg \
+          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
             --output-format CSV_UNQUOTED --execute \
-            "SELECT count(*) FROM gold.record_lineage WHERE dataset = 'diagnoses' AND is_quarantined = true" 2>/dev/null | tail -n1)
-          [ "${n:-0}" = "1" ] || fail "record_lineage: expected exactly 1 quarantined diagnosis (scenario 05's orphaned row), got $n"
+            "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
+          [ -n "$record_token" ] || fail "record_lineage: could not resolve scenario 05's record_token (diagnosis_id=9002 missing from br_diagnoses)"
           trace=$(trino --server http://localhost:8080 --catalog iceberg \
             --output-format CSV_UNQUOTED --execute \
-            "SELECT quality_status, failed_checks, is_trusted, is_quarantined, cdc_operation FROM gold.record_lineage WHERE dataset = 'diagnoses' AND is_quarantined = true" 2>/dev/null | tail -n1)
-          echo "record_lineage trace for the quarantined diagnosis: $trace"
+            "SELECT quality_status, failed_checks, is_trusted, is_quarantined, cdc_operation FROM gold.record_lineage WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+          echo "record_lineage trace for scenario 05's record: $trace"
           case "$trace" in
             FAIL,*patient_not_found*,false,true,c) ;;
             *) fail "record_lineage: expected FAIL/patient_not_found/not-trusted/quarantined/insert for the scenario 05 record, got: $trace" ;;

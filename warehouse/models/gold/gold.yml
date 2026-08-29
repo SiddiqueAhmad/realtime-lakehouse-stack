@@ -73,11 +73,13 @@ models:
       Operational lineage / incident-investigation trace, one row per
       record in the 4 fully quality-gated entities (patients, encounters,
       diagnoses, lab_results): its CDC provenance (source_event_id,
-      pipeline_run_id, cdc_operation/lsn/transaction), its quality decision
-      (quality_status/failed_checks), and whether it ended up trusted or
-      quarantined. Keyed on record_token, not the natural key — PHI-free,
-      same broad access tier as the other observability models. See the
-      model's own docstring.
+      pipeline_run_id, cdc_operation/lsn/transaction), its current quality
+      decision (quality_status/failed_checks), and whether it is currently
+      trusted or quarantined. Current-state only — reflects each record's
+      most recent quality decision, not the history of decisions leading up
+      to it. Keyed on record_token, not the natural key — PHI-free, same
+      broad access tier as the other observability models. See the model's
+      own docstring.
     columns:
       - name: dataset
         tests: [not_null]

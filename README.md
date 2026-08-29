@@ -116,9 +116,9 @@ These read `pipeline_run_id`/`cdc_source_ts_ns`/`_loaded_at` — already
 computed once per row by the reliability engine (`macros/cdc_reliability.sql`)
 — rather than adding a separate metrics-collection mechanism.
 
-### Operational lineage: "why is this record in the state it's in?"
+### Operational lineage: "why is this record in the state it's in, right now?"
 
-`gold.record_lineage` traces one record's whole journey — CDC event →
+`gold.record_lineage` traces one record's *current* journey — CDC event →
 processing run → quality decision → trusted/quarantine — for the 4 fully
 quality-gated entities (patients, encounters, diagnoses, lab_results):
 
@@ -136,11 +136,21 @@ Quality decision (quality_status / failed_checks)
 trusted quarantine   (or neither, if deleted before a decision was made)
 ```
 
+This is **current-state lineage**: one row per record, reflecting its most
+recent quality decision. If a record failed a check, sat in quarantine, was
+corrected at the source, and later passed, `record_lineage` shows only the
+latter — the earlier quarantine episode isn't retained here. For "what
+happened to this record over time, and when," a historical/incident-timeline
+model (one row per quality decision, not per record) is future work, not
+yet part of this repo.
+
 Keyed on `record_token`, not the natural key — PHI-free, so an analyst or
-an AI agent can investigate *why* a record was quarantined without
-touching a clinical value, escalating to a `clinical_user`/`data_engineer`
-(who can resolve `record_token` back to the underlying row under their own
-tier's access) only if the investigation actually needs the PHI itself.
+an AI agent can investigate *why* a record is currently quarantined without
+touching a clinical value. Resolving `record_token` back to the underlying
+row is a separate, governed lookup gated on its own access tier (see
+[Governance & PHI](#-governance--phi) below) — the token itself doesn't
+grant that; a `clinical_user`/`data_engineer` still needs to go through
+that lookup, not just read the token, to reach the PHI.
 
 ## 🔐 Governance & PHI
 
