@@ -1,0 +1,185 @@
+# =============================================================================
+# PHI / sensitivity classification registry.
+#
+# This is the single source of truth for which columns in the platform carry
+# Protected Health Information (or data that materially raises re-identification
+# risk). Everything downstream that needs to reason about sensitivity —
+# lineage payloads, the Trino minimum-necessary access rules, and the
+# de-identification models — should be built to match this file rather than
+# re-deriving the classification ad hoc.
+#
+# Classification levels:
+#   PHI          - a HIPAA identifier per 45 CFR 164.514(b)(2) (Safe Harbor's
+#                   18-identifier list), or clinical content that is only
+#                   meaningful tied to a specific patient.
+#   QUASI_PHI    - not an identifier on its own, but combinable with other
+#                   released fields to re-identify a patient (e.g. a small
+#                   geography plus a rare condition).
+#   SENSITIVE    - not patient PHI, but still access-restricted (e.g. staff
+#                   NPI, facility identifiers) as a matter of least privilege.
+#   INTERNAL     - operational/lineage metadata. Must never itself encode PHI
+#                   (see "lineage safety rules" below).
+#   PUBLIC       - safe for broad internal analytics / de-identified exports.
+#
+# NOTE ON COMPLIANCE: this registry supports a HIPAA-*aligned* platform. It is
+# a technical control, not a compliance determination. Whether a given use of
+# this data is actually permissible depends on the full administrative,
+# physical, and contractual environment (BAAs, workforce training, breach
+# procedures, etc.) — see docs/hipaa_alignment.md.
+# =============================================================================
+
+version: 1
+
+lineage_safety_rules:
+  - "Operational/observability metadata (logs, lineage events, run metrics,
+     data-quality reports, audit trails) MUST carry only INTERNAL-classified
+     fields: record_token, source_event_id, pipeline_run_id, dataset name,
+     quality_status, row counts, timestamps."
+  - "PHI- or QUASI_PHI-classified column *values* must never appear in
+     lineage/observability payloads, logs, or error messages — reference the
+     record via record_token and look the row up under an authorized,
+     audited query instead."
+  - "record_token is a deterministic, non-reversible hash of the natural key
+     (see macros/lineage.sql: generate_record_token). It lets you correlate
+     an event across pipeline stages without re-exposing the source
+     identifier (MRN, patient_id, etc.)."
+
+tables:
+  ehr.patients:
+    columns:
+      patient_id: SENSITIVE            # internal surrogate key, not itself a public identifier
+      medical_record_number: PHI       # Safe Harbor identifier #4 (MRN)
+      first_name: PHI                  # Safe Harbor identifier #1 (name)
+      last_name: PHI
+      date_of_birth: PHI               # Safe Harbor identifier #3 (date directly related to individual)
+      gender: PUBLIC
+      email: PHI                       # Safe Harbor identifier #12
+      phone: PHI                       # Safe Harbor identifier #11
+      address_line1: PHI               # Safe Harbor identifier #2 (geographic subdivision smaller than state)
+      city: QUASI_PHI
+      state: PUBLIC
+      postal_code: QUASI_PHI           # Safe Harbor allows 3-digit ZIP only for low-population areas
+      is_deceased: SENSITIVE
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.encounters:
+    columns:
+      encounter_id: SENSITIVE
+      patient_id: PHI                  # foreign key back to a patient identifier
+      provider_id: SENSITIVE
+      facility_id: SENSITIVE
+      encounter_type: PUBLIC
+      status: PUBLIC
+      encounter_start: PHI             # Safe Harbor identifier #3 (dates related to an individual)
+      encounter_end: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.diagnoses:
+    columns:
+      diagnosis_id: SENSITIVE
+      encounter_id: PHI
+      patient_id: PHI
+      icd10_code: QUASI_PHI            # rare diagnoses can be re-identifying
+      description: PHI                 # free-text clinical content
+      diagnosed_at: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.procedures:
+    columns:
+      procedure_id: SENSITIVE
+      encounter_id: PHI
+      patient_id: PHI
+      cpt_code: QUASI_PHI
+      description: PHI
+      performed_at: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.medications:
+    columns:
+      medication_id: SENSITIVE
+      patient_id: PHI
+      encounter_id: PHI
+      ndc_code: QUASI_PHI
+      name: PHI
+      dosage: PHI
+      start_date: PHI
+      end_date: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.lab_results:
+    columns:
+      lab_result_id: SENSITIVE
+      patient_id: PHI
+      encounter_id: PHI
+      loinc_code: QUASI_PHI
+      test_name: PHI
+      result_value: PHI
+      unit: PUBLIC
+      abnormal_flag: PHI
+      result_at: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.observations:
+    columns:
+      observation_id: SENSITIVE
+      patient_id: PHI
+      encounter_id: PHI
+      code: QUASI_PHI
+      value: PHI
+      unit: PUBLIC
+      observed_at: PHI
+      created_at: INTERNAL
+      updated_at: INTERNAL
+
+  ehr.providers:
+    columns:
+      provider_id: SENSITIVE
+      npi: SENSITIVE                   # publicly registered, but treated as least-privilege here
+      first_name: SENSITIVE
+      last_name: SENSITIVE
+      specialty: PUBLIC
+      facility_id: SENSITIVE
+
+  ehr.facilities:
+    columns:
+      facility_id: SENSITIVE
+      name: SENSITIVE
+      npi: SENSITIVE
+      facility_type: PUBLIC
+      city: PUBLIC
+      state: PUBLIC
+
+# Minimum-necessary role -> access matrix. Mirrored (and enforced) in
+# infra-setup/trino/rules.json — keep the two in sync.
+roles:
+  data_engineer:
+    description: >
+      Operates the pipeline. Needs operational metadata and quality/lineage
+      metrics, not raw patient values.
+    allowed_classifications: [INTERNAL, SENSITIVE, PUBLIC]
+
+  analyst:
+    description: >
+      Builds dashboards/reports on de-identified or aggregate data only.
+    allowed_classifications: [PUBLIC, INTERNAL]
+    notes: "Reads from the deid/* and gold/* (aggregate) models only."
+
+  clinical_user:
+    description: >
+      Authorized clinical/care-team access to patient-level PHI for direct
+      treatment purposes.
+    allowed_classifications: [PHI, QUASI_PHI, SENSITIVE, PUBLIC, INTERNAL]
+
+  ai_agent:
+    description: >
+      Automated agents get the minimum data required for a declared purpose,
+      scoped per task, and every access is audited. Default posture is the
+      same as analyst (de-identified/aggregate) unless a specific,
+      time-boxed, audited grant elevates it.
+    allowed_classifications: [PUBLIC, INTERNAL]

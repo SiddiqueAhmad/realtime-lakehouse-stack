@@ -1,0 +1,53 @@
+-- Scenario 8: Unauthorized PHI access (minimum-necessary access control)
+--
+-- Requires infra-setup/trino/access-control.properties to be enabled (see
+-- that directory's access-control.properties.example) and Trino restarted.
+--
+-- Trino's file-based access control keys off the submitted client user, so
+-- this is testable with the CLI's --user flag alone — no separate identity
+-- provider needed for the demonstration. Role -> policy mapping matches
+-- governance/phi_classification.yml; see infra-setup/trino/rules.json.
+
+-- As an "analyst" user: PHI/QUASI_PHI columns AND the SENSITIVE surrogate
+-- key columns should be denied — the query below should fail to resolve
+-- those columns, not return them.
+-- trino --server localhost:8080 --catalog iceberg --user analyst_jane --execute \
+--   "SELECT first_name, last_name, medical_record_number, patient_id FROM silver.sl_patients LIMIT 1"
+-- EXPECTED: Access Denied (column not accessible), not a result set.
+
+-- The same analyst user CAN see non-PHI + quality metadata, using
+-- record_token (not patient_id) as the correlation handle:
+-- trino --server localhost:8080 --catalog iceberg --user analyst_jane --execute \
+--   "SELECT record_token, gender, state, quality_status FROM silver.sl_patients LIMIT 5"
+-- EXPECTED: succeeds.
+
+-- An analyst has NO access at all to the bronze/raw layers (pipeline
+-- internals) — not even non-PHI columns, since no rule matches and
+-- file-based access control default-denies:
+-- trino --server localhost:8080 --catalog iceberg --user analyst_jane --execute \
+--   "SELECT quality_status FROM bronze.br_patients LIMIT 1"
+-- EXPECTED: Access Denied (table not accessible) — bronze has no
+-- quality_status column anyway, but the point is the schema itself is
+-- out of bounds for this tier.
+
+-- And CAN read the de-identified / aggregate layers freely:
+-- trino --server localhost:8080 --catalog iceberg --user analyst_jane --execute \
+--   "SELECT * FROM deid.patients_deidentified LIMIT 5"
+-- trino --server localhost:8080 --catalog iceberg --user analyst_jane --execute \
+--   "SELECT * FROM gold.daily_encounter_summary LIMIT 5"
+-- EXPECTED: both succeed.
+
+-- A "data_engineer" user sees operational metadata AND surrogate keys, but
+-- still not PHI/QUASI_PHI value columns:
+-- trino --server localhost:8080 --catalog iceberg --user data_engineer_pat --execute \
+--   "SELECT patient_id, quality_status, cdc_source_lsn FROM bronze.br_patients LIMIT 5"
+-- EXPECTED: succeeds.
+-- trino --server localhost:8080 --catalog iceberg --user data_engineer_pat --execute \
+--   "SELECT medical_record_number FROM bronze.br_patients LIMIT 1"
+-- EXPECTED: Access Denied.
+
+-- A "clinical_user" keeps full access (matches allowed_classifications =
+-- everything in governance/phi_classification.yml):
+-- trino --server localhost:8080 --catalog iceberg --user clinical_user_bob --execute \
+--   "SELECT first_name, last_name, medical_record_number FROM bronze.br_patients LIMIT 1"
+-- EXPECTED: succeeds.

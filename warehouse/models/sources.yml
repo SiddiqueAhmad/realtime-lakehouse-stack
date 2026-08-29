@@ -1,10 +1,21 @@
 version: 2
 
 sources:
-  - name: inventory
+  - name: ehr
+    description: >
+      Raw CDC events landed by Debezium into Iceberg. One row per change
+      event (insert/update/delete), immutable — this is the append-only
+      history the reliability layer (models/bronze) reads from. See
+      governance/phi_classification.yml for column-level sensitivity.
     database: iceberg
     schema: icebergdata
     tables:
-      - name: debeziumcdc_dbz__inventory_orders
-      - name: debeziumcdc_dbz__inventory_customers
-      - name: debeziumcdc_dbz__inventory_products
+      - name: debeziumcdc_dbz__ehr_patients
+      - name: debeziumcdc_dbz__ehr_providers
+      - name: debeziumcdc_dbz__ehr_facilities
+      - name: debeziumcdc_dbz__ehr_encounters
+      - name: debeziumcdc_dbz__ehr_diagnoses
+      - name: debeziumcdc_dbz__ehr_procedures
+      - name: debeziumcdc_dbz__ehr_medications
+      - name: debeziumcdc_dbz__ehr_lab_results
+      - name: debeziumcdc_dbz__ehr_observations

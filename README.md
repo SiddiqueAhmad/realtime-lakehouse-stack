@@ -1,49 +1,145 @@
-# 🧊 Realtime Lakehouse Stack
+# 🏥 Realtime Healthcare Data Reliability Platform
 
-**End-to-end open-source data platform — from operational Postgres to actionable insights in Metabase, powered by Debezium, Apache Iceberg, Trino, and LakeKeeper.**
+**A HIPAA-aligned, real-time healthcare data platform — CDC reliability, data quality, lineage, minimum-necessary access, and AI-readiness, built entirely on open-source components.**
 
 ![Architecture](docs/realtime-lakehouse-architecture.png)
+
+> **HIPAA-aligned, not "HIPAA compliant."** This repository implements the
+> technical controls a HIPAA-regulated data flow needs — PHI classification,
+> access control, audit-safe lineage, quality gating, de-identification. It
+> is not, and cannot be, a compliance claim on its own: compliance depends on
+> the complete administrative, physical, and contractual environment around
+> the software, not the software alone. See [`docs/hipaa_alignment.md`](docs/hipaa_alignment.md).
+>
+> **All data in this repository is synthetic.** No real patient information
+> is stored, transmitted, or referenced anywhere in this codebase.
 
 ---
 
 ## 🚀 Overview
 
-`realtime-lakehouse-stack` is a production-style data architecture built entirely with open-source components.  
-It demonstrates how organizations can move **from raw operational data to real-time analytics** using modern data lakehouse technologies.
+This stack simulates an EHR's operational data flowing through change data
+capture into a governed lakehouse:
 
-This stack simulates a complete data flow:
+1. **Postgres (TimescaleDB)** — operational EHR: `Patient → Encounter →
+   {Diagnosis, Procedure, LabResult, Observation}`, plus `Provider` and
+   `Facility`.
+2. **Debezium** — streams row-level changes out of Postgres in real time.
+3. **Apache Iceberg (via a Lakekeeper REST catalog + MinIO)** — immutable,
+   versioned raw CDC history.
+4. **dbt reliability engine (bronze)** — idempotent, ordering-safe,
+   delete-aware CDC processing.
+5. **dbt data quality gates (silver → quality)** — completeness, validity,
+   referential integrity, and clinical plausibility checks split records
+   into **trusted** vs **quarantine**.
+6. **De-identification (deid)** — a Safe-Harbor-*style* path to analytics-safe
+   data, separate from the PHI-carrying layers.
+7. **Trino / DuckDB** — query trusted, de-identified, and aggregate data.
+8. **Metabase** — BI dashboards on top of Trino.
 
-1. **Postgres (TimescaleDB)** — operational database capturing business transactions
-2. **Debezium** — streams real-time changes from Postgres
-3. **MinIO + Apache Iceberg** — scalable data lakehouse for structured, versioned data
-4. **LakeKeeper** — metadata and governance for Iceberg tables
-5. **Trino** — distributed SQL query engine for fast, interactive analysis
-6. **Metabase** — self-service BI dashboards for decision-makers
+## 🧭 The north star
 
----
+```
+HEALTHCARE SOURCE
+   PostgreSQL/EHR
+        │
+       CDC (Debezium)
+        │
+        ▼
+  RAW ICEBERG DATA  ── immutable append-only CDC history
+        │
+        ▼
+ RELIABILITY ENGINE  ── dedup / idempotency, ordering, delete handling
+   (bronze, macros/cdc_reliability.sql)
+        │
+        ▼
+  DATA QUALITY GATES  ── completeness, validity, referential integrity,
+   (silver, macros/data_quality.sql)   clinical plausibility
+        │
+   ┌────┴────┐
+   ▼         ▼
+TRUSTED   QUARANTINE
+   │
+   ▼
+DE-IDENTIFICATION (Safe-Harbor-style) ──► deid / gold (aggregate)
+   │
+   ▼
+Trino / DuckDB ──► Analytics / AI, under minimum-necessary access
+```
 
-## 🧱 Architecture at a Glance
+Lineage (`record_token`, `source_event_id`, `pipeline_run_id`,
+`quality_status`) and access control run through every layer — see
+[Governance & PHI](#-governance--phi) below — rather than being bolted on at
+the end.
 
-| Component | Role in the Platform | Business Translation |
-|------------|----------------------|----------------------|
-| **TimescaleDB (Postgres)** | Operational data storage | Records all business operations reliably |
-| **Debezium** | Real-time change capture | Automatically updates dashboards without manual ETL |
-| **MinIO + Iceberg** | Structured data lake | Central repository of clean, queryable, scalable data |
-| **LakeKeeper** | Metadata/catalog management | Teams always know what data exists and how to access it safely |
-| **Trino** | Distributed query engine | Analysts and BI tools get fast access to large datasets |
-| **Metabase** | BI dashboards | Converts data into actionable insights for executives |
+## 🏗️ Domain model
 
----
+```
+Patient
+   ├── Encounter
+   │      ├── Diagnosis
+   │      ├── Procedure
+   │      └── (Provider, Facility)
+   ├── Medication
+   ├── Lab Result
+   └── Observation
+```
 
-## 💼 Why It Matters for Organizations
+Seeded as synthetic data in `infra-setup/timescale/healthcare.sql`.
 
-Modern companies need **real-time decision-making** based on operational data — not nightly batch ETL.  
-This stack provides a **blueprint** for building your own in-house, cost-efficient, and open-source **data lakehouse** that can scale with business needs.
+## 📚 Layers
 
-Use it to:
-- Prototype modern data architectures
-- Train data teams on streaming + lakehouse concepts
-- Showcase end-to-end integration for consultancy or client pitches
+| Layer | Location | Purpose |
+|---|---|---|
+| Raw CDC | `icebergdata.debeziumcdc_dbz__ehr_*` | Immutable event history landed by Debezium |
+| Bronze | `warehouse/models/bronze/` | Reliability engine: dedup, ordering, soft deletes → current state per key |
+| Silver | `warehouse/models/silver/` | Data quality gates → `quality_status` + `failed_checks` + lineage |
+| Quality | `warehouse/models/quality/` | `trusted_*` / `quarantine_*` split by `quality_status` |
+| De-identified | `warehouse/models/deid/` | Safe-Harbor-style transform of trusted data |
+| Gold | `warehouse/models/gold/` | Aggregate-only analytics + `data_quality_summary` observability rollup |
+
+## 🔐 Governance & PHI
+
+- [`governance/phi_classification.yml`](governance/phi_classification.yml) —
+  column-level PHI/sensitivity classification and the minimum-necessary
+  role → access matrix (`data_engineer`, `analyst`, `clinical_user`,
+  `ai_agent`).
+- [`infra-setup/trino/rules.json`](infra-setup/trino/rules.json) — Trino
+  file-based access control implementing that matrix.
+  **⚠️ Not enabled by default.** `docker compose up` runs Trino wide open —
+  the rules only take effect once you copy
+  `infra-setup/trino/access-control.properties.example` to
+  `access-control.properties` and restart Trino (see that file's header).
+  Until you do, minimum-necessary access is a policy this repo *can*
+  enforce, not one the running stack *is* enforcing.
+- Lineage/observability metadata (`record_token`, `source_event_id`,
+  `pipeline_run_id`) is HMAC-keyed (not a plain hash — see
+  `docs/lineage_token_rotation.md` for why that matters and how to set
+  `RECORD_TOKEN_HMAC_KEY`) and carries no PHI values — see
+  `warehouse/macros/lineage.sql` and the "lineage safety
+  rules" in the PHI registry.
+
+## 🧪 Reliability test suite
+
+[`reliability-tests/`](reliability-tests/) exercises 12 scenarios — duplicate
+events, out-of-order delivery, deletes, invalid references, impossible
+clinical values, missing fields, unauthorized access, replay, and outage
+recovery — against the questions this platform needs to answer:
+
+> Did we preserve the correct clinical state? Can we prove where it came
+> from? Can we prove which quality checks it passed? Can we identify who
+> accessed it? Can we replay the pipeline safely?
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `dbt parse`, JSON
+validation, and 4 of the 12 scenarios against a real Postgres service
+container on every PR.
+[`.github/workflows/e2e-pipeline.yml`](.github/workflows/e2e-pipeline.yml)
+runs the actual `docker compose` stack (Debezium → Iceberg → dbt → Trino)
+and asserts two scenarios' outcomes through the real reliability engine, not
+just at the source — but it's nightly/on-demand, not a PR gate, and its
+first real runs are still shakeout (see "What's actually automated in CI" in
+`reliability-tests/README.md` for the honest version of what's proven vs.
+what's aspirational).
 
 ---
 
@@ -51,58 +147,45 @@ Use it to:
 
 ```bash
 git clone https://github.com/yourusername/realtime-lakehouse-stack.git
-cd realtime-lakehouse-stack
+cd realtime-lakehouse-stack/infra-setup
 docker compose up -d
 ```
+
 Once started:
 
-- **Metabase** → http://localhost:3000  
-- **Trino UI** → http://localhost:8080  
-- **MinIO Console** → http://localhost:9001  
-- **LakeKeeper API** → http://localhost:8181  
+- **Metabase** → http://localhost:3000
+- **Trino UI** → http://localhost:8080
+- **MinIO Console** → http://localhost:9001
+- **LakeKeeper API** → http://localhost:8181
 
----
+## 🤖 Data Transformation with dbt
 
-## 🤖 Data Transformation: From Raw Data to Business Insights with dbt
+The dbt project lives in `warehouse/` and is configured to connect to Trino,
+which reads the Iceberg lake.
 
-This is where the raw data from our operational systems is transformed into clean, reliable, and business-ready datasets. We use dbt (Data Build Tool), the industry standard for data transformation, to build our Bronze, Silver, and Gold data layers.
+```bash
+uv sync                       # once, from the repo root
+cd warehouse
+../.venv/bin/dbt seed --profiles-dir .   # loads seeds/lab_reference_ranges.csv
+../.venv/bin/dbt run  --profiles-dir .   # builds bronze → silver → quality → deid → gold
+../.venv/bin/dbt test --profiles-dir .   # runs schema/data tests
+```
 
-The dbt project is located in the `warehouse` directory and is pre-configured to connect to our Trino query engine, which reads from the Iceberg data lake.
-
-### Running the dbt Models
-
-Follow these steps to run the transformations that build our `silver` and `gold` tables:
-
-1.  **Navigate to the dbt project directory:**
-    This is the heart of our transformation logic.
-    ```bash
-    cd warehouse
-    ```
-
-2.  **Run the dbt transformations:**
-    The following command executes all the dbt models. It uses the Python virtual environment (`.venv`) where dbt is installed and tells dbt to use the local `profiles.yml` for the Trino connection.
-    ```bash
-    ../.venv/bin/dbt run --profiles-dir .
-    ```
-    You will see dbt connect to Trino and build the `enriched_orders` (Silver) and `daily_sales` (Gold) tables in your Iceberg data lake.
-
-    *Pro-tip: If you have the project's virtual environment activated in your shell (`source ../.venv/bin/activate`), you can simply run `dbt run --profiles-dir .`.*
-
-This process is the key to turning the real-time change data captured by Debezium into actionable insights in Metabase.
+*Pro-tip: `source .venv/bin/activate` once, then drop the `../.venv/bin/`
+prefix.*
 
 ---
 
 ## 🧪 Coming Next
 
-- Airflow orchestration example  
-
----
+- Airflow orchestration example
+- Expert Determination workflow for de-identified data
+- Row/column-level audit logging of PHI access
 
 ## ⭐ Support the Project
 
-If you find this stack helpful, please ⭐ **star the repository** and share it on LinkedIn!  
-Your support helps promote open-source data platforms and real-time analytics innovation.
+If you find this stack helpful, please ⭐ **star the repository** and share it on LinkedIn!
 
 ---
 
-© 2025 — Built with ❤️ by Siddique Ahmad
+© 2025–2026 — Built with ❤️ by Siddique Ahmad

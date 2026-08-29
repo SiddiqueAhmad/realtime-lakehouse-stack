@@ -15,12 +15,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 EOSQL
 echo "✅ Metabase database created."
 
-# 2. Create the 'inventory' database for Debezium
-echo "🔧 Creating Inventory database..."
+# 2. Create the 'ehr' database for Debezium (synthetic healthcare/EHR data)
+echo "🔧 Creating EHR database..."
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-    CREATE DATABASE inventory;
+    CREATE DATABASE ehr;
 EOSQL
-echo "✅ Inventory database created."
+echo "✅ EHR database created."
 
 # 3. Create the Debezium replication user (roles are global)
 echo "🔧 Creating Debezium user..."
@@ -29,25 +29,25 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 EOSQL
 echo "✅ Debezium user created."
 
-# 4. Grant connect permission to the new 'inventory' database
-echo "🔧 Granting connect permission to Inventory DB..."
+# 4. Grant connect permission to the new 'ehr' database
+echo "🔧 Granting connect permission to EHR DB..."
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-    GRANT CONNECT ON DATABASE inventory TO debezium_user;
+    GRANT CONNECT ON DATABASE ehr TO debezium_user;
 EOSQL
 echo "✅ Connect permission granted."
 
-# 5. Connect to the 'inventory' database and run the inventory.sql script
-echo "🔧 Populating Inventory database schema and data..."
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "inventory" < /docker-entrypoint-initdb.d/inventory.sql
-echo "✅ Inventory database populated."
+# 5. Connect to the 'ehr' database and run the healthcare.sql script
+echo "🔧 Populating EHR database schema and synthetic data..."
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "ehr" < /docker-entrypoint-initdb.d/healthcare.sql
+echo "✅ EHR database populated."
 
-# 6. NOW, connect to the 'inventory' database again to grant permissions and create publication
-echo "🔧 Setting up permissions and publication in Inventory DB..."
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "inventory" <<-EOSQL
-    -- Grant the Debezium user permissions for the inventory schema
-    GRANT USAGE ON SCHEMA inventory TO debezium_user;
-    GRANT SELECT ON ALL TABLES IN SCHEMA inventory TO debezium_user;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA inventory
+# 6. NOW, connect to the 'ehr' database again to grant permissions and create publication
+echo "🔧 Setting up permissions and publication in EHR DB..."
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "ehr" <<-EOSQL
+    -- Grant the Debezium user permissions for the ehr schema
+    GRANT USAGE ON SCHEMA ehr TO debezium_user;
+    GRANT SELECT ON ALL TABLES IN SCHEMA ehr TO debezium_user;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA ehr
     GRANT SELECT ON TABLES TO debezium_user;
 
     -- Create the publication for Debezium
@@ -56,12 +56,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "inventory" <<-EOSQ
 EOSQL
 echo "✅ Permissions and publication set up."
 
-# 7. enable extension pgvectorscale
-echo "🔧 Installing pgvectorscale extension in inventory"
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname inventory  <<-EOSQL
+# 7. enable extension pgvectorscale (used later for embeddings on de-identified data)
+echo "🔧 Installing pgvectorscale extension in ehr"
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname ehr  <<-EOSQL
     CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
 EOSQL
-echo "✅ pgvectorscale extension installed in inventory."
+echo "✅ pgvectorscale extension installed in ehr."
 
 
 echo "🎉 Database initialization complete!"

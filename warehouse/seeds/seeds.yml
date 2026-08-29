@@ -1,0 +1,16 @@
+version: 2
+
+seeds:
+  - name: lab_reference_ranges
+    description: >
+      Physiologically plausible bounds per LOINC code, used by
+      sl_lab_results to flag *impossible* values (not a normal/abnormal
+      clinical reference range — that's abnormal_flag on the source row).
+      Config-driven so new tests can be added without touching model SQL.
+    columns:
+      - name: loinc_code
+        tests: [not_null, unique]
+      - name: min_plausible_value
+        tests: [not_null]
+      - name: max_plausible_value
+        tests: [not_null]
