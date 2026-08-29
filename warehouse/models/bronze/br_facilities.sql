@@ -22,4 +22,4 @@
     facility_id, name, npi, facility_type, city, state
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_facilities', 'facility_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'facilities', 'facility_id', source_columns, column_list) }}

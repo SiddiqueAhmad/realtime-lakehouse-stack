@@ -22,7 +22,7 @@
 {% endmacro %}
 
 {% macro dq_failed_checks(checks) %}
-    array_join(
+    array_to_string(
         filter(
             array[
                 {% for name, expr in checks.items() %}

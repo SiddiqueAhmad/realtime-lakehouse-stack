@@ -1,26 +1,42 @@
 name: E2E pipeline reliability (best-effort)
 
-# Runs the full Postgres -> Debezium -> Iceberg -> dbt -> Trino pipeline via
-# docker compose and asserts reliability-tests/ scenarios 01-08 through the
-# actual bronze/silver/quality layers and Trino's access control, not just
-# at the Postgres source. See reliability-tests/README.md for what each
-# scenario claims.
+# Runs the full Postgres -> Debezium -> DuckDB/DuckLake pipeline via docker
+# compose and asserts reliability-tests/ scenarios 01-07 and 13 through the
+# actual bronze/silver/quality layers, not just at the Postgres source. See
+# reliability-tests/README.md for what each scenario claims.
 #
 # Deliberately NOT gating every PR (workflow_dispatch + nightly only): this
-# stands up MinIO, Lakekeeper, Postgres, Debezium, and Trino from cold and
-# waits on Debezium's initial snapshot landing in Iceberg, which is slow and
-# has more moving parts than the fast Postgres-only job in ci.yml. It was
-# written and reviewed but could not be executed in the environment that
-# authored it (no Docker daemon available there — see reliability-tests/README.md);
-# treat its first few real runs as shakeout, not as already-proven, and
-# promote it to a required PR check once it's demonstrated stable.
+# stands up Postgres and Debezium from cold and waits on Debezium's initial
+# snapshot landing in warehouse.raw_cdc, which is slow and has more moving
+# parts than the fast Postgres-only job in ci.yml.
+#
+# ARCHITECTURE NOTE: this workflow was rewritten to replace
+# Trino/Iceberg/Lakekeeper/MinIO with DuckDB + the `ducklake` extension
+# (self-hosted, Postgres-backed catalog — see warehouse/profiles.yml) and
+# Debezium's JDBC sink (writing straight to warehouse.raw_cdc.* — see
+# infra-setup/debezium-server-conf/) in place of its Iceberg sink. This
+# session's network egress policy blocks both Docker Hub/quay.io image
+# pulls and extensions.duckdb.org, so none of the new pieces — the custom
+# Debezium+JDBC-sink image building, the `ducklake`/`postgres` DuckDB
+# extensions loading, the actual JDBC sink -> raw_cdc table shape — could be
+# exercised end-to-end where this was written. Treat this run as the first
+# real validation of the whole migration, not as already-proven; expect to
+# iterate on it. See infra-setup/debezium-server-conf/Dockerfile and
+# warehouse/profiles.yml for the specific unverified assumptions.
+#
+# Also dropped in this migration: scenario 08 (minimum-necessary PHI access
+# control). Trino's file-based rules.json enforced the role -> access matrix
+# in governance/phi_classification.yml at query time; DuckDB is an
+# embedded, single-process engine with no equivalent. That file now
+# documents the intended policy without enforcing it — a real gap, not
+# something quietly dropped. See its own KNOWN GAP note.
 #
 # No production secret of any kind is used here: RECORD_TOKEN_HMAC_KEY is
 # generated fresh per run (openssl rand), and every other credential is the
-# synthetic stack's own hardcoded dev value (testuser/testpass, MinIO
-# admin/password, ...), matching infra-setup/docker-compose.yml. On failure,
-# every service's logs (plus dbt's own log) are uploaded as a build
-# artifact rather than left to scroll off the console.
+# synthetic stack's own hardcoded dev value (testuser/testpass, ...),
+# matching infra-setup/docker-compose.yml. On failure, every service's logs
+# (plus dbt's own log) are uploaded as a build artifact rather than left to
+# scroll off the console.
 
 on:
   workflow_dispatch:
@@ -37,33 +53,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Install dbt + deps
+        # dbt-duckdb and duckdb (the Python package infra-setup/scripts/dq.py
+        # also uses) are both project dependencies — see pyproject.toml.
         run: uv sync
-
-      - name: Install Trino CLI
-        run: |
-          curl -sSLo /usr/local/bin/trino \
-            https://repo1.maven.org/maven2/io/trino/trino-cli/442/trino-cli-442-executable.jar
-          chmod +x /usr/local/bin/trino
 
       - name: Generate a CI-only lineage HMAC key
         # Real RECORD_TOKEN_HMAC_KEY, generated fresh per run and never
         # logged or persisted — not the insecure dev fallback documented in
-        # warehouse/macros/lineage.sql. Written to $GITHUB_ENV so every
-        # later step (dbt run, dbt test) picks it up automatically. No
+        # warehouse/duckdb_plugins/lineage_udfs.py. Written to $GITHUB_ENV so
+        # every later step (dbt run, dq.py) picks it up automatically. No
         # production secret of any kind is used anywhere in this workflow.
         run: echo "RECORD_TOKEN_HMAC_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
-
-      - name: Enable minimum-necessary access control (scenario 08)
-        # Turning this on from the start (rather than isolating it to the
-        # scenario 08 step) is safe for scenarios 01-07: every query in this
-        # workflow before scenario 08 runs as dbt's 'trino' user or the CI
-        # runner's default identity, neither of which matches the
-        # data_engineer.*/analyst.*/ai_agent.*/clinical_user.* patterns in
-        # rules.json, so both fall through to its full-access fallback rule.
-        # This is the first time this opt-in feature (previously untested —
-        # see infra-setup/trino/access-control.properties.example) actually
-        # gets exercised end-to-end.
-        run: cp infra-setup/trino/access-control.properties.example infra-setup/trino/access-control.properties
 
       - name: Start the stack
         working-directory: infra-setup
@@ -82,51 +82,34 @@ jobs:
           echo "::error::Postgres did not become ready in time"
           exit 1
 
-      - name: Wait for Trino to accept queries
-        # Trino here isn't just the JVM booting - it's also registering the
-        # iceberg catalog against Lakekeeper's REST catalog API, which in
-        # turn depends on minio/lakekeeper already being healthy. On a
-        # shared GitHub-hosted runner, that whole chain cold-starting
-        # concurrently with Postgres/Debezium/Metabase can plausibly take
-        # longer than a JVM boot alone would. Budget for that (90 x 5s =
-        # 7.5 min, up from 60 x 5s = 5 min) rather than assuming 5 min is
-        # always enough - this workflow had literally never been executed
-        # before (see reliability-tests/README.md), so that number was a
-        # guess, not something tuned against a real run.
+      - name: Verify DuckDB/DuckLake connectivity
+        # Unlike Trino, there's no separate server process to wait on here —
+        # dq.py opens its own embedded DuckDB connection and attaches the
+        # ducklake/postgres databases itself on every invocation (see that
+        # script). This step exists to fail fast with a clear message if
+        # that first attach doesn't work (extension download hiccup, the
+        # `warehouse` database not created yet by warehouse-db-init), rather
+        # than have the real failure surface confusingly on scenario 01.
         run: |
-          for i in $(seq 1 90); do
-            if trino --server http://localhost:8080 --execute "SELECT 1" > /dev/null 2>&1; then
-              echo "Trino is up"
+          for i in $(seq 1 10); do
+            if .venv/bin/python3 infra-setup/scripts/dq.py "SELECT 1" > /dev/null 2>/tmp/dq_probe.log; then
+              echo "DuckDB/DuckLake attach OK"
               exit 0
             fi
-            echo "waiting for Trino... ($i/90)"
+            echo "waiting for DuckLake catalog to be attachable... ($i/10)"
             sleep 5
           done
-          echo "::error::Trino did not become ready in time"
-          # Print Trino's own container log straight to the job console -
-          # not just to the on-failure diagnostics artifact - so the root
-          # cause is visible without a separate artifact download (which
-          # needs its own network access from wherever these logs get
-          # investigated, and isn't guaranteed).
-          echo "::group::docker compose logs trino"
-          ( cd infra-setup && docker compose logs --no-color trino ) || true
-          echo "::endgroup::"
-          echo "::group::docker compose logs lakekeeper"
-          ( cd infra-setup && docker compose logs --no-color lakekeeper ) || true
-          echo "::endgroup::"
-          echo "::group::docker compose ps"
-          ( cd infra-setup && docker compose ps -a ) || true
-          echo "::endgroup::"
+          echo "::error::Could not attach the DuckLake/raw_cdc databases in time"
+          cat /tmp/dq_probe.log
           exit 1
 
-      - name: Wait for Debezium's initial snapshot to land in Iceberg
+      - name: Wait for Debezium's initial snapshot to land in raw_cdc
         # 4 seed patients (see infra-setup/timescale/healthcare.sql) is the
         # known-good row count for a clean start.
         run: |
           for i in $(seq 1 60); do
-            n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients" \
+            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.patients" \
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "4" ] 2>/dev/null; then
               echo "snapshot landed ($n rows)"
@@ -145,10 +128,11 @@ jobs:
           ../.venv/bin/dbt run  --profiles-dir .
           ../.venv/bin/dbt test --profiles-dir .
 
-      - name: Run scenario 01 (duplicate event) directly against Iceberg
-        # Trino-native — inserts straight into the raw CDC table, so there's
-        # no Debezium delivery to wait on before the first dbt run below.
-        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/01_duplicate_event.sql
+      - name: Run scenario 01 (duplicate event) directly against raw_cdc
+        # Postgres-native — inserts straight into the raw CDC table, so
+        # there's no Debezium delivery to wait on before the first dbt run
+        # below.
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 -f reliability-tests/01_duplicate_event.sql
 
       - name: Re-run bronze/silver for patients (redelivery merge #1)
         working-directory: warehouse
@@ -156,9 +140,8 @@ jobs:
 
       - name: Assert scenario 01's outcome through the actual reliability engine
         run: |
-          result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) || ',' || max_by(email, cdc_source_lsn) FROM bronze.br_patients WHERE patient_id = 2" \
+          result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) || ',' || max_by(email, cdc_source_lsn) FROM bronze.br_patients WHERE patient_id = 2" \
                      2>/dev/null | tail -n1)
           echo "bronze.br_patients result: $result"
           expected="1,morgan.sample+updated@synthetic.test"
@@ -166,7 +149,7 @@ jobs:
             echo "::error::Expected exactly 1 row with the updated email (redelivery of the identical event should be a no-op), got: $result"
             exit 1
           fi
-          echo "Scenario 01 passed through the real Iceberg -> dbt bronze reliability engine."
+          echo "Scenario 01 passed through the real raw_cdc -> dbt bronze reliability engine."
 
       - name: Run scenario 02 (transaction order) against the live Postgres source
         run: |
@@ -176,13 +159,11 @@ jobs:
       - name: Wait for Debezium to stream the transaction's events
         run: |
           for i in $(seq 1 30); do
-            patients_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE patient_id = 1" \
+            patients_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.patients WHERE patient_id = 1" \
                   2>/dev/null | tail -n1 || echo 0)
-            encounters_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE encounter_id = 2" \
+            encounters_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.encounters WHERE encounter_id = 2" \
                   2>/dev/null | tail -n1 || echo 0)
             # 1 snapshot row + 2 UPDATE events each.
             if [ "${patients_n:-0}" -ge "3" ] 2>/dev/null && [ "${encounters_n:-0}" -ge "3" ] 2>/dev/null; then
@@ -201,13 +182,11 @@ jobs:
 
       - name: Assert scenario 02's outcome through the actual reliability engine
         run: |
-          patients_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) || ',' || max_by(phone, cdc_source_lsn) FROM bronze.br_patients WHERE medical_record_number = 'MRN-SYN-00001'" \
+          patients_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) || ',' || max_by(phone, cdc_source_lsn) FROM bronze.br_patients WHERE medical_record_number = 'MRN-SYN-00001'" \
                      2>/dev/null | tail -n1)
-          encounters_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) || ',' || max_by(status, cdc_source_lsn) FROM bronze.br_encounters WHERE encounter_id = 2" \
+          encounters_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) || ',' || max_by(status, cdc_source_lsn) FROM bronze.br_encounters WHERE encounter_id = 2" \
                      2>/dev/null | tail -n1)
           echo "bronze.br_patients result: $patients_result"
           echo "bronze.br_encounters result: $encounters_result"
@@ -215,10 +194,10 @@ jobs:
           [ "$patients_result" = "1,555-010-9902" ] || { echo "::error::patients: expected 1,555-010-9902 got $patients_result"; ok=false; }
           [ "$encounters_result" = "1,finished" ] || { echo "::error::encounters: expected 1,finished got $encounters_result"; ok=false; }
           [ "$ok" = "true" ] || exit 1
-          echo "Scenario 02 passed end-to-end through Postgres -> Debezium -> Iceberg -> dbt bronze."
+          echo "Scenario 02 passed end-to-end through Postgres -> Debezium -> raw_cdc -> dbt bronze."
 
-      - name: Run scenario 03 (out-of-order replay) directly against Iceberg
-        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/03_out_of_order_replay.sql
+      - name: Run scenario 03 (out-of-order replay) directly against raw_cdc
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 -f reliability-tests/03_out_of_order_replay.sql
 
       - name: Re-run bronze/silver for lab_results
         working-directory: warehouse
@@ -226,9 +205,8 @@ jobs:
 
       - name: Assert scenario 03's outcome
         run: |
-          result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT result_value, cdc_source_lsn FROM bronze.br_lab_results WHERE lab_result_id = 9001" \
+          result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT result_value, cdc_source_lsn FROM bronze.br_lab_results WHERE lab_result_id = 9001" \
                      2>/dev/null | tail -n1)
           echo "bronze.br_lab_results result: $result"
           if [ "$result" != "4.2,900000002" ]; then
@@ -245,9 +223,8 @@ jobs:
       - name: Wait for Debezium to stream the delete event
         run: |
           for i in $(seq 1 30); do
-            n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_diagnoses WHERE diagnosis_id = 3 AND __op = 'd'" \
+            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.diagnoses WHERE diagnosis_id = 3 AND __op = 'd'" \
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "1" ] 2>/dev/null; then
               echo "delete event landed"
@@ -265,13 +242,11 @@ jobs:
 
       - name: Assert scenario 04's outcome
         run: |
-          bronze_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT is_deleted, cdc_operation FROM bronze.br_diagnoses WHERE diagnosis_id = 3" \
+          bronze_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT is_deleted, cdc_operation FROM bronze.br_diagnoses WHERE diagnosis_id = 3" \
                      2>/dev/null | tail -n1)
-          silver_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) FROM silver.sl_diagnoses WHERE diagnosis_id = 3" \
+          silver_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) FROM silver.sl_diagnoses WHERE diagnosis_id = 3" \
                      2>/dev/null | tail -n1)
           echo "bronze.br_diagnoses result: $bronze_result, silver row count: $silver_n"
           ok=true
@@ -280,8 +255,8 @@ jobs:
           [ "$ok" = "true" ] || exit 1
           echo "Scenario 04 passed: delete retained as an audit trail in bronze, excluded downstream."
 
-      - name: Run scenario 05 (invalid patient reference) directly against Iceberg
-        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/05_invalid_patient_reference.sql
+      - name: Run scenario 05 (invalid patient reference) directly against raw_cdc
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 -f reliability-tests/05_invalid_patient_reference.sql
 
       - name: Re-run bronze/silver/quality for diagnoses (scenario 05)
         working-directory: warehouse
@@ -289,17 +264,14 @@ jobs:
 
       - name: Assert scenario 05's outcome (also covers scenario 09 - quarantine split)
         run: |
-          silver_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT quality_status, failed_checks FROM silver.sl_diagnoses WHERE diagnosis_id = 9002" \
+          silver_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT quality_status, failed_checks FROM silver.sl_diagnoses WHERE diagnosis_id = 9002" \
                      2>/dev/null | tail -n1)
-          trusted_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) FROM quality.trusted_diagnoses WHERE diagnosis_id = 9002" \
+          trusted_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) FROM quality.trusted_diagnoses WHERE diagnosis_id = 9002" \
                      2>/dev/null | tail -n1)
-          quarantine_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) FROM quality.quarantine_diagnoses WHERE diagnosis_id = 9002" \
+          quarantine_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) FROM quality.quarantine_diagnoses WHERE diagnosis_id = 9002" \
                      2>/dev/null | tail -n1)
           echo "silver: $silver_result, trusted: $trusted_n, quarantine: $quarantine_n"
           ok=true
@@ -319,9 +291,8 @@ jobs:
       - name: Wait for Debezium to stream both new lab results
         run: |
           for i in $(seq 1 30); do
-            n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_lab_results WHERE result_value = 55.0 OR (loinc_code = '2345-7' AND result_value IS NULL)" \
+            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM raw.raw_cdc.lab_results WHERE result_value = 55.0 OR (loinc_code = '2345-7' AND result_value IS NULL)" \
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "2" ] 2>/dev/null; then
               echo "both events landed ($n rows)"
@@ -339,17 +310,14 @@ jobs:
 
       - name: Assert scenarios 06+07's outcome
         run: |
-          impossible_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT quality_status, failed_checks FROM silver.sl_lab_results WHERE result_value = 55.0" \
+          impossible_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT quality_status, failed_checks FROM silver.sl_lab_results WHERE result_value = 55.0" \
                      2>/dev/null | tail -n1)
-          missing_result=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT quality_status, failed_checks FROM silver.sl_lab_results WHERE loinc_code = '2345-7' AND result_value IS NULL" \
+          missing_result=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT quality_status, failed_checks FROM silver.sl_lab_results WHERE loinc_code = '2345-7' AND result_value IS NULL" \
                      2>/dev/null | tail -n1)
-          quarantine_n=$(trino --server http://localhost:8080 --catalog iceberg \
-                     --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) FROM quality.quarantine_lab_results WHERE result_value = 55.0 OR (loinc_code = '2345-7' AND result_value IS NULL)" \
+          quarantine_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                     "SELECT count(*) FROM quality.quarantine_lab_results WHERE result_value = 55.0 OR (loinc_code = '2345-7' AND result_value IS NULL)" \
                      2>/dev/null | tail -n1)
           echo "impossible value: $impossible_result, missing field: $missing_result, quarantined: $quarantine_n"
           ok=true
@@ -358,57 +326,6 @@ jobs:
           [ "${quarantine_n:-0}" = "2" ] || { echo "::error::expected both rows quarantined, got count=$quarantine_n"; ok=false; }
           [ "$ok" = "true" ] || exit 1
           echo "Scenarios 06+07 passed: clinical plausibility and completeness gates quarantined both rows."
-
-      - name: Assert scenario 08 (minimum-necessary access control)
-        run: |
-          fail() { echo "::error::$1"; exit 1; }
-
-          # analyst: denied PHI/QUASI_PHI + SENSITIVE surrogate-key columns.
-          trino --server http://localhost:8080 --catalog iceberg --user analyst_jane \
-              --execute "SELECT first_name, last_name, medical_record_number, patient_id FROM silver.sl_patients LIMIT 1" \
-              > /tmp/analyst_phi.log 2>&1 \
-            && fail "analyst should be denied PHI/surrogate columns, but the query succeeded: $(cat /tmp/analyst_phi.log)"
-          echo "analyst correctly denied PHI/surrogate-key columns"
-
-          # analyst: allowed non-PHI + quality metadata, correlating via record_token.
-          trino --server http://localhost:8080 --catalog iceberg --user analyst_jane \
-            --execute "SELECT record_token, gender, state, quality_status FROM silver.sl_patients LIMIT 5" > /dev/null \
-            || fail "analyst should be allowed record_token/gender/state/quality_status on silver.sl_patients"
-          echo "analyst correctly allowed non-PHI + quality metadata"
-
-          # analyst: NO access at all to bronze/raw (pipeline internals, not this tier's).
-          trino --server http://localhost:8080 --catalog iceberg --user analyst_jane \
-              --execute "SELECT quality_status FROM bronze.br_patients LIMIT 1" \
-              > /tmp/analyst_bronze.log 2>&1 \
-            && fail "analyst should have no access to bronze/raw, but the query succeeded: $(cat /tmp/analyst_bronze.log)"
-          echo "analyst correctly denied all bronze/raw access"
-
-          # analyst: allowed the de-identified / aggregate-only layers.
-          trino --server http://localhost:8080 --catalog iceberg --user analyst_jane \
-            --execute "SELECT * FROM deid.patients_deidentified LIMIT 5" > /dev/null \
-            || fail "analyst should be allowed deid.patients_deidentified"
-          trino --server http://localhost:8080 --catalog iceberg --user analyst_jane \
-            --execute "SELECT * FROM gold.daily_encounter_summary LIMIT 5" > /dev/null \
-            || fail "analyst should be allowed gold.daily_encounter_summary"
-          echo "analyst correctly allowed deid/gold"
-
-          # data_engineer: allowed operational metadata + surrogate keys, denied PHI values.
-          trino --server http://localhost:8080 --catalog iceberg --user data_engineer_pat \
-            --execute "SELECT patient_id, quality_status, cdc_source_lsn FROM bronze.br_patients LIMIT 5" > /dev/null \
-            || fail "data_engineer should be allowed patient_id/quality_status/cdc_source_lsn on bronze.br_patients"
-          trino --server http://localhost:8080 --catalog iceberg --user data_engineer_pat \
-              --execute "SELECT medical_record_number FROM bronze.br_patients LIMIT 1" \
-              > /tmp/dataeng_phi.log 2>&1 \
-            && fail "data_engineer should be denied medical_record_number, but the query succeeded: $(cat /tmp/dataeng_phi.log)"
-          echo "data_engineer correctly scoped to operational metadata + surrogate keys, not PHI values"
-
-          # clinical_user: full access.
-          trino --server http://localhost:8080 --catalog iceberg --user clinical_user_bob \
-            --execute "SELECT first_name, last_name, medical_record_number FROM bronze.br_patients LIMIT 1" > /dev/null \
-            || fail "clinical_user should retain full access, including PHI columns"
-          echo "clinical_user correctly retains full access"
-
-          echo "Scenario 08 passed: minimum-necessary access control enforced as documented in governance/phi_classification.yml."
 
       - name: Rebuild the gold observability models against final state
         working-directory: warehouse
@@ -425,8 +342,8 @@ jobs:
           lt100() { awk -v v="$1" 'BEGIN{ exit !(v + 0 < 100) }'; }
 
           for tbl in gold.cdc_freshness gold.cdc_volume_summary gold.current_quality_summary; do
-            n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED --execute "SELECT count(*) FROM $tbl" 2>/dev/null | tail -n1)
+            n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+                  "SELECT count(*) FROM $tbl" 2>/dev/null | tail -n1)
             [ "${n:-0}" = "9" ] || fail "$tbl: expected 9 dataset rows (one per bronze entity), got $n"
           done
           echo "shape OK: cdc_freshness, cdc_volume_summary, current_quality_summary each have 9 dataset rows"
@@ -434,8 +351,7 @@ jobs:
           # cdc_freshness: lag/staleness must be non-negative for every
           # dataset - a negative value means a clock or join bug, not a
           # real reading.
-          bad_freshness=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          bad_freshness=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM gold.cdc_freshness WHERE cdc_lag_seconds < 0 OR staleness_seconds < 0" 2>/dev/null | tail -n1)
           [ "${bad_freshness:-1}" = "0" ] || fail "cdc_freshness: $bad_freshness dataset(s) have negative lag/staleness"
           echo "cdc_freshness OK: lag and staleness are non-negative for every dataset"
@@ -445,19 +361,16 @@ jobs:
           # And scenario 01 (reliability-tests/01_duplicate_event.sql)
           # redelivered patient_id=2's identical event at the same LSN
           # twice, so patients must show at least 1 real duplicate.
-          bad_volume=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          bad_volume=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM gold.cdc_volume_summary WHERE raw_event_count < current_row_count" 2>/dev/null | tail -n1)
           [ "${bad_volume:-1}" = "0" ] || fail "cdc_volume_summary: $bad_volume dataset(s) have raw_event_count < current_row_count"
-          patients_dup=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          patients_dup=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT duplicate_event_count FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
           [ "${patients_dup:-0}" -ge "1" ] 2>/dev/null || fail "cdc_volume_summary: expected patients.duplicate_event_count >= 1 (scenario 01's redelivery), got $patients_dup"
           # The four rates are defined to sum to ~100% (see the model's own
           # docstring) - verify that's actually true for one real row,
           # rather than just trusting the arithmetic by inspection.
-          patients_rate_sum=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          patients_rate_sum=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT duplicate_rate_pct + insert_rate_pct + update_rate_pct + delete_rate_pct FROM gold.cdc_volume_summary WHERE dataset = 'patients'" 2>/dev/null | tail -n1)
           awk -v v="${patients_rate_sum:-0}" 'BEGIN{ if (v < 99.5 || v > 100.5) exit 1 }' \
             || fail "cdc_volume_summary: expected the 4 rate columns to sum to ~100% for patients, got $patients_rate_sum"
@@ -467,15 +380,12 @@ jobs:
           # everywhere, and diagnoses/lab_results specifically must be
           # BELOW 100% - scenarios 05/06/07 put real FAIL rows into their
           # current population.
-          bad_passrate=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          bad_passrate=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM gold.current_quality_summary WHERE current_pass_rate_pct < 0 OR current_pass_rate_pct > 100" 2>/dev/null | tail -n1)
           [ "${bad_passrate:-1}" = "0" ] || fail "current_quality_summary: $bad_passrate dataset(s) have an out-of-range pass rate"
-          diagnoses_rate=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          diagnoses_rate=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'diagnoses'" 2>/dev/null | tail -n1)
-          lab_rate=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          lab_rate=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT current_pass_rate_pct FROM gold.current_quality_summary WHERE dataset = 'lab_results'" 2>/dev/null | tail -n1)
           lt100 "${diagnoses_rate:-100}" || fail "current_quality_summary: expected diagnoses pass rate < 100% (scenario 05's quarantined row), got $diagnoses_rate"
           lt100 "${lab_rate:-100}"       || fail "current_quality_summary: expected lab_results pass rate < 100% (scenarios 06+07's quarantined rows), got $lab_rate"
@@ -499,12 +409,10 @@ jobs:
         # quarantined dataset-wide.
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          record_token=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
           [ -n "$record_token" ] || fail "record_lineage: could not resolve scenario 05's record_token (diagnosis_id=9002 missing from br_diagnoses)"
-          trace=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          trace=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT quality_status, failed_checks, is_trusted, is_quarantined, cdc_operation FROM gold.record_lineage WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
           echo "record_lineage trace for scenario 05's record: $trace"
           case "$trace" in
@@ -522,18 +430,16 @@ jobs:
         # so a failure here points at seeding, not at the append logic.
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          record_token=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
           [ -n "$record_token" ] || fail "record_lineage_event: could not resolve scenario 05's record_token"
-          n=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM gold.record_lineage_event WHERE record_token = '$record_token' AND quality_status = 'FAIL' AND is_quarantined = true" 2>/dev/null | tail -n1)
           [ "${n:-0}" = "1" ] || fail "record_lineage_event: expected exactly 1 logged FAIL/quarantined entry for scenario 05's record, got $n"
           echo "record_lineage_event OK: scenario 05's quarantine decision is logged."
 
-      - name: Run scenario 13 (corrected referential integrity) against Iceberg
-        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/13_quarantine_correction.sql
+      - name: Run scenario 13 (corrected referential integrity) against raw_cdc
+        run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 -f reliability-tests/13_quarantine_correction.sql
 
       - name: Re-run the pipeline for the correction (scenario 13)
         working-directory: warehouse
@@ -550,25 +456,21 @@ jobs:
         # BOTH, from two separate dbt runs, for the same record_token.
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          record_token=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
           [ -n "$record_token" ] || fail "scenario 13: could not resolve diagnosis_id=9002's record_token"
 
-          current=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          current=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT quality_status, is_trusted, is_quarantined FROM gold.record_lineage WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
           [ "$current" = "PASS,true,false" ] || fail "scenario 13: expected record_lineage to now show PASS/trusted/not-quarantined for the corrected record, got: $current"
           echo "record_lineage OK: current state flipped to PASS/trusted after the correction (this is all record_lineage alone can show)."
 
-          history_n=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
+          history_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
           [ "${history_n:-0}" -ge "2" ] 2>/dev/null || fail "scenario 13: expected record_lineage_event to retain at least 2 decisions for this record_token (quarantine then trusted), got $history_n"
 
-          history=$(trino --server http://localhost:8080 --catalog iceberg \
-            --output-format CSV_UNQUOTED --execute \
-            "SELECT array_join(array_agg(quality_status || '/' || cast(is_trusted as varchar) || '/' || cast(is_quarantined as varchar) ORDER BY logged_at), ' -> ') FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+          history=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT string_agg(quality_status || '/' || cast(is_trusted as varchar) || '/' || cast(is_quarantined as varchar), ' -> ' ORDER BY logged_at) FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
           echo "record_lineage_event history for this record_token: $history"
           case "$history" in
             *"FAIL/false/true"*"PASS/true/false"*) ;;
@@ -585,7 +487,7 @@ jobs:
         run: |
           mkdir -p artifacts
           ( cd infra-setup && docker compose logs --no-color ) > artifacts/docker-compose-all.log 2>&1 || true
-          for svc in db debezium-iceberg trino lakekeeper minio metabase; do
+          for svc in db debezium warehouse-db-init metabase; do
             ( cd infra-setup && docker compose logs --no-color "$svc" ) > "artifacts/${svc}.log" 2>&1 || true
           done
           cp warehouse/logs/dbt.log artifacts/dbt.log 2>/dev/null || true

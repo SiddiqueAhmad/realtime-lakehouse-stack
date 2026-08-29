@@ -22,4 +22,4 @@
     provider_id, npi, first_name, last_name, specialty, facility_id
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_providers', 'provider_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'providers', 'provider_id', source_columns, column_list) }}

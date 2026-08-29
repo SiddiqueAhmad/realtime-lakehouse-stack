@@ -4,9 +4,19 @@
 # This is the single source of truth for which columns in the platform carry
 # Protected Health Information (or data that materially raises re-identification
 # risk). Everything downstream that needs to reason about sensitivity —
-# lineage payloads, the Trino minimum-necessary access rules, and the
-# de-identification models — should be built to match this file rather than
-# re-deriving the classification ad hoc.
+# lineage payloads and the de-identification models — should be built to
+# match this file rather than re-deriving the classification ad hoc.
+#
+# KNOWN GAP since the DuckDB/DuckLake migration (see README's architecture
+# section): the role -> access matrix below used to be mechanically
+# enforced by Trino's file-based access control (infra-setup/trino/rules.json,
+# removed with Trino). DuckDB is an embedded, single-process query engine —
+# it has no per-connection/per-role ACL layer to enforce this matrix at
+# query time. This file is now documentation of the intended policy, not an
+# enforced one; nothing in this stack currently stops a `data_engineer`-tier
+# query from reading a PHI column. Closing this gap (e.g. role-scoped
+# Postgres views + real GRANTs in front of gold/deid outputs, so a real
+# serving layer keeps a testable ACL) is follow-up work, not done here.
 #
 # Classification levels:
 #   PHI          - a HIPAA identifier per 45 CFR 164.514(b)(2) (Safe Harbor's
@@ -155,8 +165,9 @@ tables:
       city: PUBLIC
       state: PUBLIC
 
-# Minimum-necessary role -> access matrix. Mirrored (and enforced) in
-# infra-setup/trino/rules.json — keep the two in sync.
+# Minimum-necessary role -> access matrix. Documented intent only for now —
+# see the KNOWN GAP note at the top of this file; not mechanically enforced
+# since the Trino access-control layer was removed.
 roles:
   data_engineer:
     description: >

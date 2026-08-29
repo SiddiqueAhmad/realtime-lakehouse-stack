@@ -1,12 +1,22 @@
 -- Scenario 8: Unauthorized PHI access (minimum-necessary access control)
 --
--- Requires infra-setup/trino/access-control.properties to be enabled (see
--- that directory's access-control.properties.example) and Trino restarted.
+-- NOT CURRENTLY ENFORCED OR EXERCISED IN CI. This scenario depended on
+-- Trino's file-based access control (infra-setup/trino/rules.json), removed
+-- when this stack migrated to DuckDB/DuckLake (see README's architecture
+-- section) — DuckDB is an embedded, single-process query engine with no
+-- per-connection/per-role ACL layer to enforce the role -> access matrix
+-- documented in governance/phi_classification.yml at query time. That file
+-- now carries its own KNOWN GAP note; this scenario is kept only as a
+-- record of the intended policy (and as a spec for whatever replaces this
+-- enforcement — see the gap note for the leading candidate, role-scoped
+-- Postgres views + real GRANTs). None of the commands below run against
+-- anything today.
 --
--- Trino's file-based access control keys off the submitted client user, so
--- this is testable with the CLI's --user flag alone — no separate identity
--- provider needed for the demonstration. Role -> policy mapping matches
--- governance/phi_classification.yml; see infra-setup/trino/rules.json.
+-- Original design note, for whoever picks this back up: Trino's file-based
+-- access control keyed off the submitted client user, so it was testable
+-- with the CLI's --user flag alone — no separate identity provider needed
+-- for the demonstration. Role -> policy mapping matched
+-- governance/phi_classification.yml.
 
 -- As an "analyst" user: PHI/QUASI_PHI columns AND the SENSITIVE surrogate
 -- key columns should be denied — the query below should fail to resolve

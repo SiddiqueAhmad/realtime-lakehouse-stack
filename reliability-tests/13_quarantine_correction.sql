@@ -22,16 +22,16 @@
 -- run, including its own dbt run, so record_lineage_event has already
 -- logged the quarantine decision for diagnosis_id=9002's record_token.
 --
--- Run: trino --server localhost:8080 --catalog iceberg -f 13_quarantine_correction.sql
+-- Run: psql -h localhost -p 5433 -U testuser -d warehouse -f 13_quarantine_correction.sql
 --
 -- (created_at/updated_at/__transaction_* are omitted below for the same
 -- reason as scenario 03; __source_lsn must be set for the same reason as
 -- scenario 05.)
 
-INSERT INTO icebergdata.debeziumcdc_dbz__ehr_patients
+INSERT INTO raw_cdc.patients
     (patient_id, medical_record_number, first_name, last_name, date_of_birth, gender, email, phone, address_line1, city, state, postal_code, is_deceased, __op, __table, __source_ts_ns, __source_lsn, __db)
 VALUES (999999, 'MRN-SYN-999999', 'Synthetic', 'LateArrival', DATE '1980-01-01', 'unknown', NULL, NULL, NULL, NULL, NULL, NULL, false,
-        'c', 'patients', CAST(to_unixtime(TIMESTAMP '2026-03-01 09:05:00') * 1e9 AS BIGINT), 900000004, 'ehr');
+        'c', 'patients', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:05:00') * 1e9 AS BIGINT), 900000004, 'ehr');
 
 -- Then:
 --   cd warehouse && ../.venv/bin/dbt run \
@@ -48,7 +48,7 @@ VALUES (999999, 'MRN-SYN-999999', 'Synthetic', 'LateArrival', DATE '1980-01-01',
 -- before/after this scenario exists to prove record_lineage alone can't
 -- show, since it only ever holds the latest row.
 --
--- VERIFY (trino --server localhost:8080 --catalog iceberg):
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
 --   SELECT quality_status, failed_checks FROM silver.sl_diagnoses WHERE diagnosis_id = 9002;
 --   -- quality_status = 'PASS', failed_checks = NULL (or empty)
 --   SELECT count(*) FROM quality.trusted_diagnoses WHERE diagnosis_id = 9002;

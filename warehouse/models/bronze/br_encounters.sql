@@ -25,4 +25,4 @@
     status, encounter_start, encounter_end
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_encounters', 'encounter_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'encounters', 'encounter_id', source_columns, column_list) }}

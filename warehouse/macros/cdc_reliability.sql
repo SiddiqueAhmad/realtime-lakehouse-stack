@@ -38,12 +38,15 @@
   of that identity, not just its position in the WAL. See
   generate_source_event_id.
 
-  The raw Iceberg table this reads from is an append-only event log
-  (debezium.sink.iceberg.upsert=false) — every change event is preserved,
-  not just the latest per key — so replay/audit/forensic lineage work off
-  the actual CDC history, not a current-state projection that's already lost
-  it. cdc_reliable_select() is what turns that at-least-once, unbounded
-  event log into "the current state of each row", handling:
+  The raw Postgres table this reads from (warehouse.raw_cdc.<table>,
+  written by Debezium's JDBC sink — see
+  infra-setup/debezium-server-conf/application.properties) is an
+  append-only event log (insert.mode=insert, primary.key.mode=none) —
+  every change event is preserved, not just the latest per key — so
+  replay/audit/forensic lineage work off the actual CDC history, not a
+  current-state projection that's already lost it. cdc_reliable_select() is
+  what turns that at-least-once, unbounded event log into "the current
+  state of each row", handling:
 
     - idempotency / deduplication: collapse multiple events for the same key
       within a batch down to the newest one (by LSN), so replaying a batch

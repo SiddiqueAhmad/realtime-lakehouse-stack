@@ -25,4 +25,4 @@
     start_date, end_date
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_medications', 'medication_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'medications', 'medication_id', source_columns, column_list) }}

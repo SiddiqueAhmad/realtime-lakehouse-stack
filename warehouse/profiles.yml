@@ -1,13 +1,53 @@
-
 warehouse:
   target: dev
   outputs:
     dev:
-      type: trino
-      method: http
-      host: localhost
-      port: 8080
-      user: trino
-      catalog: iceberg
-      schema: icebergdata
-      threads: 1
+      type: duckdb
+      # Primary database: a self-hosted DuckLake catalog, backed by Postgres
+      # (the same `db` service that's already running for everything else in
+      # this stack — no extra catalog service needed). DuckLake stores table
+      # *metadata* (snapshots, schema, file listing) transactionally in
+      # Postgres and *data* as Parquet under DATA_PATH, which is what gives
+      # this stack real multi-process concurrent read/write safety — a bare
+      # local .duckdb file doesn't have that. This is the replacement for
+      # Iceberg + Lakekeeper's REST catalog + MinIO.
+      #
+      # UNVERIFIED IN SANDBOX: written against dbt-duckdb 1.11's documented
+      # `ducklake:` path scheme and DuckDB's `ducklake` extension, but this
+      # session's network policy blocks extensions.duckdb.org, so the
+      # extension itself could not be downloaded/loaded here to confirm the
+      # exact ATTACH syntax end-to-end. First real run is
+      # .github/workflows/e2e-pipeline.yml in CI, which does have internet
+      # access.
+      path: "ducklake:postgres:dbname={{ env_var('DUCKLAKE_CATALOG_DB', 'warehouse') }} host={{ env_var('DUCKLAKE_CATALOG_HOST', 'localhost') }} port={{ env_var('DUCKLAKE_CATALOG_PORT', '5433') }} user={{ env_var('DUCKLAKE_CATALOG_USER', 'testuser') }} password={{ env_var('DUCKLAKE_CATALOG_PASSWORD', 'testpass') }}"
+      is_ducklake: true
+      options:
+        data_path: "'{{ env_var('DUCKLAKE_DATA_PATH', '/tmp/ducklake_data') }}/'"
+      extensions:
+        - postgres
+      # Secondary attach, plain Postgres (not DuckLake): read-only view onto
+      # Debezium's JDBC-sink landing tables (warehouse.raw_cdc.<table> — see
+      # debezium-server-conf/application.properties). This is what
+      # models/sources.yml's `ehr` source resolves against — the append-only
+      # raw CDC event log, same role the raw Iceberg tables used to play.
+      attach:
+        - path: "dbname={{ env_var('RAW_CDC_DB', 'warehouse') }} host={{ env_var('RAW_CDC_HOST', 'localhost') }} port={{ env_var('RAW_CDC_PORT', '5433') }} user={{ env_var('RAW_CDC_USER', 'testuser') }} password={{ env_var('RAW_CDC_PASSWORD', 'testpass') }}"
+          alias: raw
+          options:
+            type: postgres
+            read_only: true
+      # Registers hmac_sha256_hex(key, msg) as a callable SQL function (see
+      # duckdb_plugins/lineage_udfs.py) — DuckDB has sha256() but no
+      # built-in keyed HMAC, unlike Trino. Computing it in a Python UDF
+      # rather than inline SQL is also a real security improvement over the
+      # previous (Trino) design: the HMAC_KEY only ever gets read from the
+      # environment inside this Python function — it never gets templated
+      # into compiled SQL text, closing the exact "key can leak into query
+      # logs" limitation docs/lineage_token_rotation.md documented for the
+      # Trino version. See warehouse/macros/lineage.sql.
+      module_paths:
+        - duckdb_plugins
+      plugins:
+        - module: lineage_udfs
+      schema: gold
+      threads: 4

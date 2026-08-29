@@ -22,4 +22,4 @@
     procedure_id, encounter_id, patient_id, cpt_code, description, performed_at
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_procedures', 'procedure_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'procedures', 'procedure_id', source_columns, column_list) }}

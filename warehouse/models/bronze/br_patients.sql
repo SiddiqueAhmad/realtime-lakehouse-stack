@@ -30,4 +30,4 @@
     gender, email, phone, address_line1, city, state, postal_code, is_deceased
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_patients', 'patient_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'patients', 'patient_id', source_columns, column_list) }}

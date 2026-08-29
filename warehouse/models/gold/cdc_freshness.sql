@@ -67,13 +67,13 @@ row_counts as (
 
 select
     lp.dataset,
-    from_unixtime(lp.cdc_source_ts_ns / 1e9) as latest_processed_source_event_at,
+    to_timestamp(lp.cdc_source_ts_ns / 1e9) as latest_processed_source_event_at,
     lp._loaded_at                            as latest_processed_loaded_at,
     lp.pipeline_run_id                       as latest_processed_pipeline_run_id,
     rc.bronze_row_count,
     -- Source-to-load latency of the SAME event, not two independently
     -- chosen timestamps.
-    date_diff('second', from_unixtime(lp.cdc_source_ts_ns / 1e9), lp._loaded_at) as cdc_lag_seconds,
+    date_diff('second', to_timestamp(lp.cdc_source_ts_ns / 1e9), lp._loaded_at) as cdc_lag_seconds,
     -- How long ago that same event was landed, relative to now (when this
     -- observability model itself runs). Distinct from lag — a dataset can
     -- have low historical lag but still be stale right now if the pipeline

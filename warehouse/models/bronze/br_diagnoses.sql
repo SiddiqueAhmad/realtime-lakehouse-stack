@@ -22,4 +22,4 @@
     diagnosis_id, encounter_id, patient_id, icd10_code, description, diagnosed_at
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_diagnoses', 'diagnosis_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'diagnoses', 'diagnosis_id', source_columns, column_list) }}

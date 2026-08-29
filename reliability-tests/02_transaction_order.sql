@@ -29,7 +29,7 @@ COMMIT;
 --     wins) — never two rows, never the intermediate '555-010-9901'.
 --   - exactly one row for encounter_id = 2, status = 'finished'.
 --
--- VERIFY (trino --server localhost:8080 --catalog iceberg):
+-- VERIFY (duckdb, via infra-setup/scripts/dq.py):
 --   SELECT count(*) AS row_count, max_by(phone, cdc_source_lsn) AS latest_phone
 --   FROM bronze.br_patients
 --   WHERE medical_record_number = 'MRN-SYN-00001';

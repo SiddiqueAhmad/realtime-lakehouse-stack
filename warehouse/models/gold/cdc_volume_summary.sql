@@ -15,23 +15,23 @@
 
 with raw_unioned as (
 
-    select 'patients'     as dataset, patient_id     as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_patients') }}
+    select 'patients'     as dataset, patient_id     as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'patients') }}
     union all
-    select 'providers'    as dataset, provider_id    as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_providers') }}
+    select 'providers'    as dataset, provider_id    as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'providers') }}
     union all
-    select 'facilities'   as dataset, facility_id    as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_facilities') }}
+    select 'facilities'   as dataset, facility_id    as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'facilities') }}
     union all
-    select 'encounters'   as dataset, encounter_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_encounters') }}
+    select 'encounters'   as dataset, encounter_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'encounters') }}
     union all
-    select 'diagnoses'    as dataset, diagnosis_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_diagnoses') }}
+    select 'diagnoses'    as dataset, diagnosis_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'diagnoses') }}
     union all
-    select 'procedures'   as dataset, procedure_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_procedures') }}
+    select 'procedures'   as dataset, procedure_id   as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'procedures') }}
     union all
-    select 'medications'  as dataset, medication_id  as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_medications') }}
+    select 'medications'  as dataset, medication_id  as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'medications') }}
     union all
-    select 'lab_results'  as dataset, lab_result_id  as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_lab_results') }}
+    select 'lab_results'  as dataset, lab_result_id  as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'lab_results') }}
     union all
-    select 'observations' as dataset, observation_id as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'debeziumcdc_dbz__ehr_observations') }}
+    select 'observations' as dataset, observation_id as natural_key, __source_lsn as lsn, __op as cdc_operation from {{ source('ehr', 'observations') }}
 
 ),
 

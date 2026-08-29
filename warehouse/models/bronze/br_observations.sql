@@ -23,4 +23,4 @@
     observation_id, patient_id, encounter_id, code, value, unit, observed_at
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_observations', 'observation_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'observations', 'observation_id', source_columns, column_list) }}

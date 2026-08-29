@@ -10,21 +10,23 @@ pipeline died mid-stream?
 2. While Debezium is still catching up (before it has flushed all events),
    kill the sink:
    ```bash
-   docker kill debezium-server-iceberg
+   docker kill debezium
    ```
-3. Confirm via the container logs / Iceberg table state that only some of
-   the events made it through.
+3. Confirm via the container logs / `raw_cdc.*` table state that only some
+   of the events made it through.
 4. Restart it:
    ```bash
-   docker compose up -d debezium-iceberg
+   docker compose up -d debezium
    ```
 
 ## Expected
 
-- Debezium resumes from its last committed offset
-  (`debezium_offset_storage_table`, per `application.properties`), not from
-  scratch — no full resnapshot, no gap, no duplication of events it had
-  already committed before the kill.
+- Debezium resumes from its last committed offset (the local
+  `offsets.dat`/`schema-history.dat` files, per `application.properties` —
+  note these live in the `debezium-data` Docker volume, not the container's
+  writable layer, so a container restart doesn't lose them; a full
+  `docker compose down -v` would), not from scratch — no full resnapshot, no
+  gap, no duplication of events it had already committed before the kill.
 - Once it catches up and `dbt run --profiles-dir .` is executed, every write
   from step 1 is present and correct — run the relevant scenario's `VERIFY`
   query from `01`/`03`/`06` to confirm.

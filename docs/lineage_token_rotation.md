@@ -26,17 +26,26 @@ fraction of a second — try every integer, compare hashes. HMAC with a secret
 key that never appears in the token closes that off: recovering the natural
 key from a token requires either the key or breaking HMAC-SHA256.
 
-## The tokens are templated into compiled SQL — treat that as sensitive
+## The key no longer appears in compiled SQL (as of v4)
 
-dbt resolves `env_var()` at **compile time** and inlines the literal key
-value into the SQL text sent to Trino (and into `warehouse/target/`, which
-is gitignored but still exists on disk and in dbt's query logs). That's an
-acceptable tradeoff for this repo's synthetic data, but it means the key
-itself is exposed to anyone who can read compiled SQL, Trino's query history,
-or dbt's logs — not just to whoever reads the token values. A production
+Through v3, `generate_record_token`/`generate_source_event_id` called
+Trino's `hmac_sha256()` directly, and dbt resolves `env_var()` at **compile
+time** — the literal key value got inlined into the SQL text sent to Trino
+(and into `warehouse/target/`, which is gitignored but still exists on disk
+and in dbt's query logs). That was an acceptable tradeoff for this repo's
+synthetic data, but it meant the key itself was exposed to anyone who could
+read compiled SQL, Trino's query history, or dbt's logs — not just to
+whoever read the token values.
+
+The DuckDB/DuckLake migration (v4) closes this: HMAC is now computed by a
+Python UDF (`warehouse/duckdb_plugins/lineage_udfs.py`) that reads
+`RECORD_TOKEN_HMAC_KEY` straight from the process environment at connection
+time. The key is passed as a Python closure, never as a SQL literal — it
+never appears in compiled SQL, a query log, or `target/` — closing the gap
+the v1-v3 (Trino) design could only flag and defer: "a production
 deployment handling real ePHI should move the HMAC computation into a
-catalog-side function or UDF the key never has to leave, rather than
-templating it into every query.
+catalog-side function or UDF the key never has to leave." That's now what
+this repo actually does, not still a recommendation.
 
 ## Rotation
 
@@ -84,3 +93,18 @@ rather than being a hard cutover:
   `record_token` *across* entities — which is exactly what
   `models/gold/record_lineage.sql` (added in the same change) does. Found
   while building that model, not by a review catching it first.
+- **v3 → v4**: the DuckDB/DuckLake migration (Trino/Iceberg/Lakekeeper
+  removed — see README's architecture section). Both `record_token` and
+  `source_event_id` are rev'd (`r_v3_` → `r_v4_`, `evt_v2_` → `evt_v3_`)
+  because the underlying HMAC computation moved from Trino's
+  `hmac_sha256()` SQL function to a Python UDF
+  (`warehouse/duckdb_plugins/lineage_udfs.py`) — DuckDB has no built-in
+  keyed HMAC. The formula itself (tenant:table:natural_key, and the
+  source_event_id fingerprint) is unchanged; what changed is where the key
+  is read from and how the digest is computed, which is enough that old and
+  new tokens are worth treating as a rotation boundary rather than assuming
+  byte-for-byte equivalence was verified (it wasn't — no live warehouse was
+  available to cross-check v3 and v4 tokens against each other; see this
+  PR's own validation notes). This rotation is also what closes "The key no
+  longer appears in compiled SQL" above — a real security improvement, not
+  just an engine-compatibility change.

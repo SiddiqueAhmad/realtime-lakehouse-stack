@@ -26,4 +26,4 @@
     result_value, unit, abnormal_flag, result_at
 {% endset %}
 
-{{ cdc_reliable_select('ehr', 'debeziumcdc_dbz__ehr_lab_results', 'lab_result_id', source_columns, column_list) }}
+{{ cdc_reliable_select('ehr', 'lab_results', 'lab_result_id', source_columns, column_list) }}

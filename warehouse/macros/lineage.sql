@@ -11,25 +11,21 @@
   enough that truncation isn't the weak point; the key is), keyed by
   RECORD_TOKEN_HMAC_KEY. A plain hash of the natural key is NOT safe here:
   patient_id and friends are small sequential integers, so an unkeyed hash
-  is brute-forceable in a fraction of a second. Set RECORD_TOKEN_HMAC_KEY in
-  the environment dbt runs in (a secrets manager in any real deployment) —
-  never commit it. The fallback below is an obviously-fake dev-only key so
-  local/CI runs work without one, and is not fit for anything containing
-  real PHI-shaped data beyond this repo's synthetic fixtures.
+  is brute-forceable in a fraction of a second.
 
-  KNOWN LIMITATION: dbt resolves env_var() at compile time and inlines the
-  literal key into the SQL text sent to Trino, so the key itself — not just
-  the tokens it produces — can end up in compiled SQL, Trino's query log,
-  and dbt's own logs/target/ artifacts. That's an acceptable tradeoff for
-  this repo's synthetic data, but a deployment handling real ePHI should
-  move this computation into a catalog-side function or UDF the key never
-  has to leave, rather than templating it into every query. See
-  docs/lineage_token_rotation.md.
+  v4 (this version): the HMAC itself is computed by hmac_sha256_hex(), a
+  Python UDF registered by warehouse/duckdb_plugins/lineage_udfs.py — DuckDB
+  has sha256() but no built-in keyed HMAC, unlike Trino. That UDF reads
+  RECORD_TOKEN_HMAC_KEY straight from the process environment, which is
+  also a real security improvement over the v2/v3 (Trino) design: the key
+  never gets templated into compiled SQL text the way env_var() used to
+  inline it, so it can no longer leak into a query log or dbt's target/
+  artifacts. See docs/lineage_token_rotation.md's v3 -> v4 entry and
+  duckdb_plugins/lineage_udfs.py's own docstring for the full rationale.
+  RECORD_TOKEN_HMAC_KEY itself is still set the same way (env var, with the
+  same obviously-fake dev-only fallback for local/CI runs — see that
+  plugin's _DEV_ONLY_KEY).
 #}
-
-{% macro _record_token_hmac_key() %}
-{{ return(env_var('RECORD_TOKEN_HMAC_KEY', 'dev-only-insecure-key-DO-NOT-USE-IN-PRODUCTION')) }}
-{% endmacro %}
 
 {% macro generate_record_token(table_expr, natural_key_expr, tenant='ehr') %}
     -- Keyed, non-reversible per-row token: same (tenant, table, natural
@@ -46,12 +42,9 @@
     -- ever joins against other tables of that same entity), but wrong the
     -- moment something correlates record_token across entities, e.g.
     -- models/gold/record_lineage.sql's cross-entity union.
-    ('r_v3_' || substr(
-        to_hex(
-            hmac_sha256(
-                to_utf8('{{ tenant }}:' || cast({{ table_expr }} as varchar) || ':' || cast({{ natural_key_expr }} as varchar)),
-                to_utf8('{{ _record_token_hmac_key() }}')
-            )
+    ('r_v4_' || substr(
+        hmac_sha256_hex(
+            '{{ tenant }}:' || cast({{ table_expr }} as varchar) || ':' || cast({{ natural_key_expr }} as varchar)
         ),
         1, 32
     ))
@@ -70,18 +63,13 @@
     -- tx_id/tx_total_order are null for snapshot ('r') events, which aren't
     -- part of a streamed transaction — LSN (always present, unique per row
     -- even in a snapshot) covers that case via the coalesce below.
-    ('evt_v2_' || substr(
-        to_hex(
-            hmac_sha256(
-                to_utf8(
-                    '{{ tenant }}:' ||
-                    cast({{ table_expr }} as varchar) || ':' ||
-                    cast({{ natural_key_expr }} as varchar) || ':' ||
-                    coalesce(cast({{ tx_id_expr }} as varchar), 'snapshot') || ':' ||
-                    coalesce(cast({{ tx_total_order_expr }} as varchar), cast({{ lsn_expr }} as varchar))
-                ),
-                to_utf8('{{ _record_token_hmac_key() }}')
-            )
+    ('evt_v3_' || substr(
+        hmac_sha256_hex(
+            '{{ tenant }}:' ||
+            cast({{ table_expr }} as varchar) || ':' ||
+            cast({{ natural_key_expr }} as varchar) || ':' ||
+            coalesce(cast({{ tx_id_expr }} as varchar), 'snapshot') || ':' ||
+            coalesce(cast({{ tx_total_order_expr }} as varchar), cast({{ lsn_expr }} as varchar))
         ),
         1, 32
     ))
