@@ -70,7 +70,27 @@ jobs:
 
       - name: Start the stack
         working-directory: infra-setup
-        run: docker compose up -d
+        # Real run (33249260789): the debezium image build finally
+        # succeeded, but `docker compose up -d` itself then failed - the
+        # one-shot warehouse-db-init service (runs
+        # timescale/warehouse-db-init.sql via psql - see that service's
+        # own definition) exited 2, which is psql's "connection to server
+        # failed" code, not a SQL error. Its own stdout/stderr only goes to
+        # the on-failure diagnostics artifact (blocked download in this
+        # session, same as elsewhere) - dump it inline on failure so the
+        # real message is visible without that.
+        run: |
+          if docker compose up -d; then
+            exit 0
+          fi
+          echo "::error::docker compose up -d failed"
+          echo "::group::docker compose logs warehouse-db-init"
+          docker compose logs --no-color warehouse-db-init || true
+          echo "::endgroup::"
+          echo "::group::docker compose ps -a"
+          docker compose ps -a || true
+          echo "::endgroup::"
+          exit 1
 
       - name: Wait for Postgres to accept connections
         run: |
