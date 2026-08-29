@@ -59,8 +59,23 @@ def main() -> int:
     # column on purpose (e.g. `count(*) || ',' || max_by(...)`) and compare
     # it against a literal "1,value" string — quoting a field just because
     # its *value* happens to contain a comma would break those comparisons.
+    #
+    # Booleans specifically need lowercasing: Python's str(True) is "True",
+    # but every boolean-comparing call site in e2e-pipeline.yml (scenario
+    # 04's "true,d", scenario 13's "PASS,true,false", etc.) was written
+    # against Trino's lowercase "true"/"false" convention and a real run
+    # failed a value-correct assertion over exactly this - "expected
+    # true,d ... got True,d" - once scenario 04 was actually reached for
+    # the first time in this migration.
+    def _fmt(v):
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
     for row in rows:
-        print(",".join("" if v is None else str(v) for v in row))
+        print(",".join(_fmt(v) for v in row))
     return 0
 
 
