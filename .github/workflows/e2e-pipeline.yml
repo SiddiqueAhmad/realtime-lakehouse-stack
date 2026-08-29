@@ -1,8 +1,9 @@
 name: E2E pipeline reliability (best-effort)
 
 # Runs the full Postgres -> Debezium -> Iceberg -> dbt -> Trino pipeline via
-# docker compose and asserts a reliability scenario's outcome through the
-# actual bronze/silver layers, not just at the Postgres source.
+# docker compose and asserts scenario 01 (duplicate event) and scenario 02
+# (transaction order) through the actual bronze/silver layers, not just at
+# the Postgres source.
 #
 # Deliberately NOT gating every PR (workflow_dispatch + nightly only): this
 # stands up MinIO, Lakekeeper, Postgres, Debezium, and Trino from cold and
@@ -79,28 +80,12 @@ jobs:
           ../.venv/bin/dbt run  --profiles-dir .
           ../.venv/bin/dbt test --profiles-dir .
 
-      - name: Run scenario 01 (duplicate patient event) against the live source
-        run: |
-          PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr \
-            -v ON_ERROR_STOP=1 -f reliability-tests/01_duplicate_patient_event.sql
+      - name: Run scenario 01 (duplicate event) directly against Iceberg
+        # Trino-native — inserts straight into the raw CDC table, so there's
+        # no Debezium delivery to wait on before the first dbt run below.
+        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/01_duplicate_event.sql
 
-      - name: Wait for Debezium to stream the update
-        run: |
-          for i in $(seq 1 30); do
-            n=$(trino --server http://localhost:8080 --catalog iceberg \
-                  --output-format CSV_UNQUOTED \
-                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 1" \
-                  2>/dev/null | tail -n1 || echo 0)
-            # Two new UPDATE events for patient 1 on top of the 1 snapshot row.
-            if [ "${n:-0}" -ge "3" ] 2>/dev/null; then
-              echo "update events landed ($n raw rows for patient 1)"
-              break
-            fi
-            echo "waiting for CDC update events... ($i/30, currently $n rows)"
-            sleep 5
-          done
-
-      - name: Re-run bronze/silver for patients
+      - name: Re-run bronze/silver for patients (redelivery merge #1)
         working-directory: warehouse
         run: ../.venv/bin/dbt run --select br_patients sl_patients --profiles-dir .
 
@@ -108,14 +93,62 @@ jobs:
         run: |
           result=$(trino --server http://localhost:8080 --catalog iceberg \
                      --output-format CSV_UNQUOTED \
-                     --execute "SELECT count(*) || ',' || max_by(phone, cdc_source_lsn) FROM bronze.br_patients WHERE medical_record_number = 'MRN-SYN-00001'" \
+                     --execute "SELECT count(*) || ',' || max_by(email, cdc_source_lsn) FROM bronze.br_patients WHERE patient_id = 2" \
                      2>/dev/null | tail -n1)
           echo "bronze.br_patients result: $result"
-          if [ "$result" != "1,555-010-9902" ]; then
-            echo "::error::Expected exactly 1 row with phone=555-010-9902 (dedup/ordering through the real pipeline), got: $result"
+          expected="1,morgan.sample+updated@synthetic.test"
+          if [ "$result" != "$expected" ]; then
+            echo "::error::Expected exactly 1 row with the updated email (redelivery of the identical event should be a no-op), got: $result"
             exit 1
           fi
-          echo "Scenario 01 passed end-to-end through Postgres -> Debezium -> Iceberg -> dbt bronze."
+          echo "Scenario 01 passed through the real Iceberg -> dbt bronze reliability engine."
+
+      - name: Run scenario 02 (transaction order) against the live Postgres source
+        run: |
+          PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr \
+            -v ON_ERROR_STOP=1 -f reliability-tests/02_transaction_order.sql
+
+      - name: Wait for Debezium to stream the transaction's events
+        run: |
+          for i in $(seq 1 30); do
+            patients_n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_patients WHERE id = 1" \
+                  2>/dev/null | tail -n1 || echo 0)
+            encounters_n=$(trino --server http://localhost:8080 --catalog iceberg \
+                  --output-format CSV_UNQUOTED \
+                  --execute "SELECT count(*) FROM icebergdata.debeziumcdc_dbz__ehr_encounters WHERE id = 2" \
+                  2>/dev/null | tail -n1 || echo 0)
+            # 1 snapshot row + 2 UPDATE events each.
+            if [ "${patients_n:-0}" -ge "3" ] 2>/dev/null && [ "${encounters_n:-0}" -ge "3" ] 2>/dev/null; then
+              echo "transaction events landed (patients=$patients_n, encounters=$encounters_n)"
+              break
+            fi
+            echo "waiting for CDC events... ($i/30, patients=$patients_n, encounters=$encounters_n)"
+            sleep 5
+          done
+
+      - name: Re-run bronze/silver for patients and encounters
+        working-directory: warehouse
+        run: ../.venv/bin/dbt run --select br_patients sl_patients br_encounters sl_encounters --profiles-dir .
+
+      - name: Assert scenario 02's outcome through the actual reliability engine
+        run: |
+          patients_result=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED \
+                     --execute "SELECT count(*) || ',' || max_by(phone, cdc_source_lsn) FROM bronze.br_patients WHERE medical_record_number = 'MRN-SYN-00001'" \
+                     2>/dev/null | tail -n1)
+          encounters_result=$(trino --server http://localhost:8080 --catalog iceberg \
+                     --output-format CSV_UNQUOTED \
+                     --execute "SELECT count(*) || ',' || max_by(status, cdc_source_lsn) FROM bronze.br_encounters WHERE encounter_id = 2" \
+                     2>/dev/null | tail -n1)
+          echo "bronze.br_patients result: $patients_result"
+          echo "bronze.br_encounters result: $encounters_result"
+          ok=true
+          [ "$patients_result" = "1,555-010-9902" ] || { echo "::error::patients: expected 1,555-010-9902 got $patients_result"; ok=false; }
+          [ "$encounters_result" = "1,finished" ] || { echo "::error::encounters: expected 1,finished got $encounters_result"; ok=false; }
+          [ "$ok" = "true" ] || exit 1
+          echo "Scenario 02 passed end-to-end through Postgres -> Debezium -> Iceberg -> dbt bronze."
 
       - name: Dump service logs on failure
         if: failure()

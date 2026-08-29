@@ -45,10 +45,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Load synthetic EHR schema
         run: PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d ehr -v ON_ERROR_STOP=1 -f infra-setup/timescale/healthcare.sql
-      - name: Run Postgres-based reliability scenarios (01, 03, 04, 06, 07)
+      - name: Run Postgres-based reliability scenarios (02, 04, 06, 07)
         run: |
-          for f in reliability-tests/01_duplicate_patient_event.sql \
-                   reliability-tests/03_duplicate_encounter.sql \
+          for f in reliability-tests/02_transaction_order.sql \
                    reliability-tests/04_deleted_diagnosis.sql \
                    reliability-tests/06_impossible_lab_value.sql \
                    reliability-tests/07_missing_required_field.sql; do
