@@ -69,4 +69,20 @@ warehouse:
       plugins:
         - module: lineage_udfs
       schema: gold
-      threads: 4
+      # threads: 1, NOT dbt's usual default of 4 or more: a real
+      # e2e-pipeline.yml run (33268516850) segfaulted (exit 139, no dbt-level
+      # error at all - a native crash) the first time this pipeline ever ran
+      # `dbt run` across bronze + silver + quality + gold models together in
+      # one invocation, which is also the first time it exercised more than
+      # one thread concurrently writing to the DuckLake catalog. Could not
+      # reproduce locally against a plain (non-DuckLake) DuckDB file with an
+      # equivalent multi-model, multi-thread incremental workload - ran it
+      # repeatedly, no crash - which points at DuckLake's own concurrent-write
+      # handling specifically, not dbt-duckdb's incremental materialization in
+      # general. Consistent with a confirmed, currently-open upstream report
+      # (duckdb/ducklake#233): concurrent writes to a DuckLake catalog are
+      # documented as unreliable today. Serializing to one thread avoids any
+      # concurrent DuckLake write in this pipeline entirely; the dataset here
+      # is synthetic test fixtures, so the lost parallelism costs nothing
+      # that matters. Revisit once ducklake#233 is resolved upstream.
+      threads: 1
