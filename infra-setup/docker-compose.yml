@@ -68,13 +68,15 @@ services:
   # event log's previous role when it lived in Iceberg (see that file's own
   # comments for why append-only, not upserted, matters for replay/audit).
   #
-  # The stock debezium/server image bundles every sink module (JDBC
-  # included) by default - no custom image needed. (An earlier version of
-  # this compose file built a custom image assuming otherwise; that was
-  # wrong, confirmed by this exact JDBC sink working once that assumption
-  # was dropped - see git history if curious.)
+  # The stock quay.io/debezium/server image does NOT have the jdbc sink
+  # registered at runtime ("No Debezium consumer named 'jdbc' is
+  # available" - confirmed against a real container, not assumed) - see
+  # debezium-server-conf/Dockerfile, which installs the full
+  # debezium-server-dist distribution on top of it.
   debezium:
-    image: quay.io/debezium/server:3.0.8.Final
+    build:
+      context: debezium-server-conf
+      dockerfile: Dockerfile
     container_name: debezium
     networks:
       warehouse_net:

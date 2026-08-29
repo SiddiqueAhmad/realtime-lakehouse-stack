@@ -18,9 +18,12 @@ name: E2E pipeline reliability (best-effort)
 # session that wrote this had no route to Docker Hub/quay.io or
 # extensions.duckdb.org, so none of it could be exercised end-to-end where
 # this was written — but GitHub Actions runners do have that access, and
-# the first two real runs here already found and fixed one wrong assumption
-# (the JDBC sink needing a custom image with hand-added jars — it doesn't;
-# the stock image bundles every sink module by default). Treat each run as
+# real runs here have already driven out and fixed several wrong
+# assumptions in turn: a bad Maven coordinate for the JDBC sink jar; then
+# (wrongly) assuming the stock image needed no sink jars added at all
+# ("No Debezium consumer named 'jdbc' is available" said otherwise, for
+# real); now installing the actual debezium-server-dist distribution
+# instead (see debezium-server-conf/Dockerfile). Treat each run as
 # still-settling validation, not as already-proven; expect further
 # iteration until it's green.
 #

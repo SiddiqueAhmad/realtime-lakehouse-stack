@@ -99,10 +99,11 @@ migration (replacing Trino/Iceberg/Lakekeeper/MinIO) in an environment with
 no route to Docker Hub/quay.io or DuckDB's own extension repository, so
 none of the new pieces could be exercised end-to-end where this was
 written — actual GitHub Actions runs are this migration's first real
-validation, and its first two runs already found and fixed one wrong
-assumption (the JDBC sink needing a custom image with hand-added jars — it
-doesn't; the stock `debezium/server` image bundles every sink module by
-default). Treat its runs as still-settling validation, not as
-already-proven, and promote it to a required PR check (and extend it to
-the 10–12 runbooks) once it's demonstrated stable, rather than trusting it
+validation, and have already driven out and fixed several wrong
+assumptions in turn (a bad Maven coordinate for the JDBC sink jar, then
+wrongly assuming the stock image needed no sink jars added at all — a real
+run said otherwise: "No Debezium consumer named 'jdbc' is available").
+Treat its runs as still-settling validation, not as already-proven, and
+promote it to a required PR check (and extend it to the 10–12 runbooks)
+once it's demonstrated stable, rather than trusting it
 blind because it parses.
