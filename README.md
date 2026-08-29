@@ -152,6 +152,46 @@ row is a separate, governed lookup gated on its own access tier (see
 grant that; a `clinical_user`/`data_engineer` still needs to go through
 that lookup, not just read the token, to reach the PHI.
 
+### Historical operational lineage: "what happened to this record, and when?"
+
+`gold.record_lineage_event` is the append-only counterpart to
+`record_lineage`: every quality decision it has ever computed for a record,
+not just the current one. Same 4 entities, same `record_token` key, same
+PHI-free boundary — but where `record_lineage` overwrites a record's row in
+place as its decision changes, this logs a new row each time it does:
+
+```
+run 1: CDC event → quality decision → FAIL / quarantined      (logged)
+run 2: (unrelated changes; this record's decision unchanged → not re-logged)
+run 3: correction lands → quality decision → PASS / trusted   (logged)
+```
+
+That's the "why was this record quarantined at 10:02, even though it's
+trusted now?" question `record_lineage` alone can't answer — the earlier
+row is still there. A decision can change for two different reasons, both
+captured: the record's own CDC event changed, or a record it depends on
+did (e.g. a diagnosis's `patient_not_found` check flips from FAIL to PASS
+purely because the referenced patient now exists — the diagnosis's own
+`source_event_id` never changes).
+
+**Known limitation**, stated up front rather than implied away: this logs
+one entry per dbt run in which a decision changed, not one per underlying
+CDC event. If a record's decision flips more than once between two runs,
+only the decision current as of the later run is logged — the same
+current-state limit bronze itself has (see
+`macros/cdc_reliability.sql`'s docstring). Reconstructing sub-run-granular
+history would mean rebuilding decisions directly off the raw CDC log with
+point-in-time referential joins, which this repo doesn't attempt yet. What
+it does guarantee: every decision this pipeline has actually computed and
+exposed downstream is retained, in the order it was computed — and the
+ledger's own start-of-history point is when this model was first built, not
+retroactively reconstructed further back.
+
+`reliability-tests/13_quarantine_correction.sql` exercises this end-to-end:
+it lands the patient scenario 5 was missing, re-runs the pipeline, and
+confirms `record_lineage_event` retains both scenario 5's original
+quarantine decision and the new trusted one for the same `record_token`.
+
 ## 🔐 Governance & PHI
 
 - [`governance/phi_classification.yml`](governance/phi_classification.yml) —

@@ -489,6 +489,69 @@ jobs:
           esac
           echo "record_lineage OK: scenario 05's incident (invalid patient reference) traces end-to-end from CDC event to quarantine."
 
+      - name: Assert record_lineage_event logged scenario 05's quarantine decision
+        # The "Rebuild the gold observability models against final state"
+        # step above was record_lineage_event's FIRST build this run, so it
+        # seeded from current_state - which by then already includes
+        # scenario 05's quarantine. This is the "before" half of the
+        # before/after scenario 13 (below) demonstrates; asserted separately
+        # so a failure here points at seeding, not at the append logic.
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
+          [ -n "$record_token" ] || fail "record_lineage_event: could not resolve scenario 05's record_token"
+          n=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.record_lineage_event WHERE record_token = '$record_token' AND quality_status = 'FAIL' AND is_quarantined = true" 2>/dev/null | tail -n1)
+          [ "${n:-0}" = "1" ] || fail "record_lineage_event: expected exactly 1 logged FAIL/quarantined entry for scenario 05's record, got $n"
+          echo "record_lineage_event OK: scenario 05's quarantine decision is logged."
+
+      - name: Run scenario 13 (corrected referential integrity) against Iceberg
+        run: trino --server http://localhost:8080 --catalog iceberg -f reliability-tests/13_quarantine_correction.sql
+
+      - name: Re-run the pipeline for the correction (scenario 13)
+        working-directory: warehouse
+        run: |
+          ../.venv/bin/dbt run --select \
+            br_patients sl_patients trusted_patients quarantine_patients \
+            br_diagnoses sl_diagnoses trusted_diagnoses quarantine_diagnoses \
+            gold --profiles-dir .
+
+      - name: Assert scenario 13's outcome - quarantine to trusted, both retained in history
+        # The actual point of record_lineage_event: record_lineage (current
+        # state) can only ever show ONE of these two facts at a time; this
+        # assertion is only meaningful because record_lineage_event retains
+        # BOTH, from two separate dbt runs, for the same record_token.
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          record_token=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT record_token FROM bronze.br_diagnoses WHERE diagnosis_id = 9002" 2>/dev/null | tail -n1)
+          [ -n "$record_token" ] || fail "scenario 13: could not resolve diagnosis_id=9002's record_token"
+
+          current=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT quality_status, is_trusted, is_quarantined FROM gold.record_lineage WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+          [ "$current" = "PASS,true,false" ] || fail "scenario 13: expected record_lineage to now show PASS/trusted/not-quarantined for the corrected record, got: $current"
+          echo "record_lineage OK: current state flipped to PASS/trusted after the correction (this is all record_lineage alone can show)."
+
+          history_n=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT count(*) FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+          [ "${history_n:-0}" -ge "2" ] 2>/dev/null || fail "scenario 13: expected record_lineage_event to retain at least 2 decisions for this record_token (quarantine then trusted), got $history_n"
+
+          history=$(trino --server http://localhost:8080 --catalog iceberg \
+            --output-format CSV_UNQUOTED --execute \
+            "SELECT array_join(array_agg(quality_status || '/' || cast(is_trusted as varchar) || '/' || cast(is_quarantined as varchar) ORDER BY logged_at), ' -> ') FROM gold.record_lineage_event WHERE record_token = '$record_token'" 2>/dev/null | tail -n1)
+          echo "record_lineage_event history for this record_token: $history"
+          case "$history" in
+            *"FAIL/false/true"*"PASS/true/false"*) ;;
+            *) fail "record_lineage_event: expected the FAIL/quarantined decision to precede the PASS/trusted one in history, got: $history" ;;
+          esac
+          echo "record_lineage_event OK: the incident timeline record_lineage alone can't show - quarantine, then correction, then trusted - is intact."
+
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
         # multi-service pipeline. Every service's log, plus dbt's own log,

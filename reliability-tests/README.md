@@ -1,6 +1,6 @@
 # Reliability test suite
 
-Twelve scenarios that exercise the CDC reliability engine
+Thirteen scenarios that exercise the CDC reliability engine
 (`warehouse/macros/cdc_reliability.sql`), the data quality gates
 (`warehouse/macros/data_quality.sql`), and lineage (`warehouse/macros/lineage.sql`)
 against the questions the platform needs to be able to answer:
@@ -36,6 +36,7 @@ pipeline can pass one while failing another:
 | 10 | Pipeline replay | `10_pipeline_replay.md` | idempotency at the batch level |
 | 11 | Partial CDC failure | `11_partial_cdc_failure.md` | crash recovery |
 | 12 | Reprocessing after outage | `12_reprocessing_after_outage.md` | offset resumption + ordering |
+| 13 | Corrected referential integrity | `13_quarantine_correction.sql` | historical lineage — quarantine → trusted transition, both retained |
 
 Connection defaults used below: Postgres on `localhost:5433`
 (db=`ehr`, user=`testuser`, password=`testpass`); Trino on `localhost:8080`
