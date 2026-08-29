@@ -1,0 +1,58 @@
+{
+  "catalogs": [
+    { "user": ".*", "catalog": "iceberg", "allow": "all" },
+    { "user": ".*", "catalog": "system", "allow": "read-only" }
+  ],
+  "schemas": [
+    { "user": ".*", "catalog": "iceberg", "schema": ".*", "owner": true }
+  ],
+  "tables": [
+    {
+      "_comment": "Minimum-necessary: analyst / ai_agent users never see PHI-classified columns on the raw/reliability/quality layers, even though they can query the tables (e.g. to see quality_status, row counts). Column list mirrors PHI+QUASI_PHI entries in governance/phi_classification.yml.",
+      "user": "analyst.*|ai_agent.*",
+      "catalog": "iceberg",
+      "schema": "bronze|silver|quality|icebergdata",
+      "table": ".*",
+      "privileges": ["SELECT"],
+      "columns": [
+        { "name": "medical_record_number", "allow": false },
+        { "name": "first_name", "allow": false },
+        { "name": "last_name", "allow": false },
+        { "name": "date_of_birth", "allow": false },
+        { "name": "email", "allow": false },
+        { "name": "phone", "allow": false },
+        { "name": "address_line1", "allow": false },
+        { "name": "city", "allow": false },
+        { "name": "postal_code", "allow": false },
+        { "name": "description", "allow": false },
+        { "name": "name", "allow": false },
+        { "name": "dosage", "allow": false },
+        { "name": "value", "allow": false },
+        { "name": "result_value", "allow": false },
+        { "name": "abnormal_flag", "allow": false },
+        { "name": "encounter_start", "allow": false },
+        { "name": "encounter_end", "allow": false },
+        { "name": "diagnosed_at", "allow": false },
+        { "name": "performed_at", "allow": false },
+        { "name": "result_at", "allow": false },
+        { "name": "observed_at", "allow": false }
+      ]
+    },
+    {
+      "_comment": "De-identified and aggregate-only schemas are safe for the broad analyst/ai_agent tier as-is.",
+      "user": "analyst.*|ai_agent.*",
+      "catalog": "iceberg",
+      "schema": "deid|gold",
+      "table": ".*",
+      "privileges": ["SELECT"]
+    },
+    {
+      "_comment": "Everyone else (data_engineer / clinical_user / the demo's default trino & admin users) keeps full access, so the existing dbt/Metabase flows are unaffected.",
+      "user": ".*",
+      "catalog": "iceberg",
+      "schema": ".*",
+      "table": ".*",
+      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]
+    }
+  ]
+}
