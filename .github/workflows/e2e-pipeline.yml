@@ -83,16 +83,40 @@ jobs:
           exit 1
 
       - name: Wait for Trino to accept queries
+        # Trino here isn't just the JVM booting - it's also registering the
+        # iceberg catalog against Lakekeeper's REST catalog API, which in
+        # turn depends on minio/lakekeeper already being healthy. On a
+        # shared GitHub-hosted runner, that whole chain cold-starting
+        # concurrently with Postgres/Debezium/Metabase can plausibly take
+        # longer than a JVM boot alone would. Budget for that (90 x 5s =
+        # 7.5 min, up from 60 x 5s = 5 min) rather than assuming 5 min is
+        # always enough - this workflow had literally never been executed
+        # before (see reliability-tests/README.md), so that number was a
+        # guess, not something tuned against a real run.
         run: |
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if trino --server http://localhost:8080 --execute "SELECT 1" > /dev/null 2>&1; then
               echo "Trino is up"
               exit 0
             fi
-            echo "waiting for Trino... ($i/60)"
+            echo "waiting for Trino... ($i/90)"
             sleep 5
           done
           echo "::error::Trino did not become ready in time"
+          # Print Trino's own container log straight to the job console -
+          # not just to the on-failure diagnostics artifact - so the root
+          # cause is visible without a separate artifact download (which
+          # needs its own network access from wherever these logs get
+          # investigated, and isn't guaranteed).
+          echo "::group::docker compose logs trino"
+          ( cd infra-setup && docker compose logs --no-color trino ) || true
+          echo "::endgroup::"
+          echo "::group::docker compose logs lakekeeper"
+          ( cd infra-setup && docker compose logs --no-color lakekeeper ) || true
+          echo "::endgroup::"
+          echo "::group::docker compose ps"
+          ( cd infra-setup && docker compose ps -a ) || true
+          echo "::endgroup::"
           exit 1
 
       - name: Wait for Debezium's initial snapshot to land in Iceberg
