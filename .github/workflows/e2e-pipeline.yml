@@ -135,11 +135,13 @@ jobs:
             # 1 snapshot row + 2 UPDATE events each.
             if [ "${patients_n:-0}" -ge "3" ] 2>/dev/null && [ "${encounters_n:-0}" -ge "3" ] 2>/dev/null; then
               echo "transaction events landed (patients=$patients_n, encounters=$encounters_n)"
-              break
+              exit 0
             fi
             echo "waiting for CDC events... ($i/30, patients=$patients_n, encounters=$encounters_n)"
             sleep 5
           done
+          echo "::error::Timed out waiting for scenario 02's CDC events to land (patients=${patients_n:-0}, encounters=${encounters_n:-0})"
+          exit 1
 
       - name: Re-run bronze/silver for patients and encounters
         working-directory: warehouse
@@ -197,11 +199,13 @@ jobs:
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "1" ] 2>/dev/null; then
               echo "delete event landed"
-              break
+              exit 0
             fi
             echo "waiting for CDC delete event... ($i/30)"
             sleep 5
           done
+          echo "::error::Timed out waiting for scenario 04's CDC delete event to land"
+          exit 1
 
       - name: Re-run bronze/silver/quality for diagnoses (scenario 04)
         working-directory: warehouse
@@ -269,11 +273,13 @@ jobs:
                   2>/dev/null | tail -n1 || echo 0)
             if [ "${n:-0}" -ge "2" ] 2>/dev/null; then
               echo "both events landed ($n rows)"
-              break
+              exit 0
             fi
             echo "waiting for CDC events... ($i/30, currently $n rows)"
             sleep 5
           done
+          echo "::error::Timed out waiting for scenarios 06+07's CDC events to land (only $n/2 rows present)"
+          exit 1
 
       - name: Re-run bronze/silver/quality for lab_results (scenarios 06+07)
         working-directory: warehouse
