@@ -151,14 +151,25 @@ JVM query server, no separate object-store service, no REST catalog service
    operational EHR Postgres connection now, not a warehouse one. Querying
    `gold.*`/`deid.*` today means running `infra-setup/scripts/dq.py`
    directly (see "Quick Start" below) or `dbt show`.
-3. **DuckLake writes are serialized (`threads: 1`), not concurrent.**
-   Concurrent writes from multiple threads to the same DuckLake catalog are
-   a confirmed, currently-open upstream limitation
-   (`duckdb/ducklake#233`) — a real run of this pipeline segfaulted the one
-   time it exercised concurrent DuckLake writes. `warehouse/profiles.yml`
-   pins `threads: 1` to avoid that entirely. Treat this deployment as a
-   single serialized writer with multiple readers, not a generally
-   concurrency-safe warehouse; revisit once that upstream issue is fixed.
+3. **This deployment serializes DuckLake writes (`threads: 1`); DuckLake
+   itself is not single-writer by design.** DuckLake coordinates writers
+   through optimistic concurrency control against its SQL catalog
+   (Postgres here) — no locks, conflicting commits get rejected and
+   retried — and explicitly supports multiple concurrent writers as an
+   architectural feature, not something bolted on. What actually happened:
+   a real run of this pipeline segfaulted the one time it exercised
+   concurrent DuckLake writes, and `warehouse/profiles.yml` pins
+   `threads: 1` to avoid that entirely. Two upstream reports from around
+   that time describe real concurrent-write instability in the
+   duckdb/ducklake engine build we hit this on (`duckdb/ducklake#233`,
+   `#243`) — both now CLOSED and fixed upstream, and neither describes a
+   crash/segfault specifically, so this project never pinned its own
+   segfault to either issue's exact mechanism, only confirmed that
+   `threads: 1` eliminates it. With both cited issues since fixed, this is
+   worth re-testing directly (not assumed resolved) before ever removing
+   the setting. Until then, treat this deployment as a single serialized
+   writer with multiple readers by its own conservative choice, not as
+   proof of a DuckLake limitation.
    This isn't just a performance constraint — `gold.record_lineage_event`'s
    `event_sequence` (read-current-max, then +1, per `record_token`; see
    that model's own docstring) is correct only under a single serialized
@@ -168,11 +179,17 @@ JVM query server, no separate object-store service, no REST catalog service
    has no mechanism to detect or prevent on its own — it relies entirely on
    `threads: 1` (and on nothing else writing to this catalog at the same
    time) to make that race impossible, not on any property of
-   `event_sequence`'s own arithmetic. If this pipeline ever needs true
-   concurrent writers to the same catalog, `event_sequence` allocation
-   would need to move to a mechanism with real atomic-increment semantics
-   (a database-native sequence, or a compare-and-swap on a dedicated
-   allocator table) rather than a same-transaction read-then-add-one.
+   `event_sequence`'s own arithmetic, and not on DuckLake's own
+   conflict-and-retry — that operates at the storage/snapshot level and
+   isn't guaranteed to catch this specific application-level race just
+   because DuckLake supports concurrent writers generally. If this
+   pipeline ever needs true concurrent writers to the same catalog,
+   `event_sequence` allocation would need its own explicit safety net — a
+   verified reliance on DuckLake's conflict detection actually catching
+   this case, or a mechanism with real atomic-increment semantics (a
+   database-native sequence, or a compare-and-swap on a dedicated
+   allocator table) — rather than assuming concurrent-writer support alone
+   makes a same-transaction read-then-add-one safe.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC

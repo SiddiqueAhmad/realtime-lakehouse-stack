@@ -79,10 +79,29 @@ warehouse:
       # equivalent multi-model, multi-thread incremental workload - ran it
       # repeatedly, no crash - which points at DuckLake's own concurrent-write
       # handling specifically, not dbt-duckdb's incremental materialization in
-      # general. Consistent with a confirmed, currently-open upstream report
-      # (duckdb/ducklake#233): concurrent writes to a DuckLake catalog are
-      # documented as unreliable today. Serializing to one thread avoids any
-      # concurrent DuckLake write in this pipeline entirely; the dataset here
-      # is synthetic test fixtures, so the lost parallelism costs nothing
-      # that matters. Revisit once ducklake#233 is resolved upstream.
+      # general.
+      #
+      # DuckLake ITSELF is explicitly designed for multiple concurrent
+      # writers - it coordinates via optimistic concurrency control against
+      # its SQL catalog (Postgres here): writers don't take locks, and a
+      # conflicting commit is rejected and retried rather than corrupting
+      # anything. The crash we hit is not evidence DuckLake requires a
+      # single writer; it's evidence that concurrent-write reliability in
+      # the specific engine build we hit this with was still maturing.
+      # Two real upstream reports from around that time -
+      # duckdb/ducklake#233 ("concurrent writes don't really work at all...
+      # just conflict and fail") and #243 (a duplicate-key error specific to
+      # a freshly-created catalog's first write) - are both now CLOSED
+      # (fixed via PR #236 and its own fix respectively). Neither report
+      # describes a crash/segfault specifically, though, so this project
+      # never pinned its own segfault to either issue's exact mechanism -
+      # only confirmed that serializing writes (this threads: 1) eliminates
+      # it. With both cited issues now fixed upstream, this is worth
+      # re-testing directly (does concurrent writing to this catalog crash
+      # today, on a current duckdb/ducklake build?) before ever removing
+      # this setting - not assuming it's resolved just because the tracked
+      # issues are closed. Until that's actually re-verified, serializing
+      # to one thread avoids any concurrent DuckLake write in this pipeline
+      # entirely; the dataset here is synthetic test fixtures, so the lost
+      # parallelism costs nothing that matters.
       threads: 1

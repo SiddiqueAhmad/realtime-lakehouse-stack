@@ -91,17 +91,24 @@
 --
 -- CONCURRENCY CONTRACT: event_sequence's own arithmetic (read the current
 -- max via last_logged_current, then +1) is only correct under a single
--- serialized writer against this catalog - see README.md's "DuckLake
--- writes are serialized" known gap. Two concurrent dbt runs against the
--- same DuckLake catalog could both read the same prior value for a
+-- serialized writer against this catalog - see README.md's DuckLake
+-- concurrency known gap. Two concurrent dbt runs against the same
+-- DuckLake catalog could both read the same prior value for a
 -- record_token and both compute the same next one; nothing in this model
 -- detects or prevents that race. This is safe today because
 -- warehouse/profiles.yml pins threads: 1 and nothing else writes to this
--- catalog concurrently - not because of any property of this column's own
--- read-then-add-one logic. A real concurrent-writer requirement would need
--- event_sequence allocation to move to something with actual atomic-
--- increment semantics (a database-native sequence, or a compare-and-swap
--- on a dedicated allocator table), not this pattern.
+-- catalog concurrently - not because DuckLake can't do concurrent writers
+-- (it's explicitly designed to, via optimistic concurrency control against
+-- its SQL catalog) and not because of any property of this column's own
+-- read-then-add-one logic. DuckLake's own conflict-and-retry operates at
+-- the storage/snapshot level, and there's no verified guarantee it would
+-- catch two writers landing on the same event_sequence value for the same
+-- record_token as a conflict. A real concurrent-writer requirement would
+-- need either that guarantee explicitly verified, or event_sequence
+-- allocation moved to something with actual atomic-increment semantics
+-- (a database-native sequence, or a compare-and-swap on a dedicated
+-- allocator table) - not an assumption that DuckLake's general
+-- concurrent-writer support covers this specific case for free.
 --
 -- DELETED as a quality_status value: record_lineage deliberately leaves
 -- quality_status null for a record whose current bronze row is a delete
