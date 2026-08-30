@@ -1,6 +1,7 @@
 """
-dbt-duckdb plugin: registers next_event_sequence(record_token) as a callable
-SQL function on every DuckDB connection dbt opens.
+dbt-duckdb plugin: registers next_event_sequence_if_new(record_token,
+decision_fingerprint) as a callable SQL function on every DuckDB connection
+dbt opens.
 
 WHY THIS EXISTS: gold.record_lineage_event's per-record_token event_sequence
 counter used to be computed in plain SQL as read-current-max-then-+1 (see
@@ -16,53 +17,84 @@ transaction's newly-appended ROW happen to carry the same logical
 event_sequence value" - two non-overlapping appends are, from DuckLake's
 point of view, two entirely uncontested writes. Both land, and the ledger
 silently accumulates duplicate (record_token, event_sequence) pairs - a real
-correctness bug, not a hypothetical one (6 such pairs, confirmed).
+correctness bug, confirmed (6 such pairs in that run).
 
-HOW: allocates event_sequence from a dedicated allocator table
-(lineage_seq.record_lineage_event_seq) in the SAME Postgres server that
-already backs the DuckLake catalog (see profiles.yml's DUCKLAKE_CATALOG_*
-env vars) - but reached here via a direct psycopg2 connection, deliberately
-bypassing DuckDB/DuckLake entirely for this one operation. `INSERT ... ON
-CONFLICT (record_token) DO UPDATE SET next_seq = next_seq + 1 RETURNING
-next_seq` is a single atomic Postgres statement: Postgres takes a real row
-lock on that record_token's allocator row for the duration of the UPDATE, so
-two concurrent callers racing on the same record_token are serialized by
-Postgres itself (the second blocks until the first commits, then reads the
-first's already-incremented value), and each gets a distinct, correctly
-incremented value - exactly the "compare-and-swap on a dedicated allocator
-table" record_lineage_event.sql's own docstring calls for as the real fix.
+A FIRST VERSION OF THIS FIX WAS INCOMPLETE, confirmed by that same
+scenario's next real run: allocating a genuinely unique event_sequence per
+call (see next_event_sequence(), superseded below) does stop the (record_token,
+event_sequence) collision, but does NOT stop the model's own `changed` CTE
+from logging the SAME decision twice - each writer reads its own snapshot
+of {{ this }} at query start, before the other writer's insert has
+committed, so both independently conclude "this decision hasn't been logged
+yet" and both proceed to insert a row for it, just with two distinct
+(and therefore non-colliding) event_sequence values. The real run this
+model's own field-level test caught it with: 10 logged decisions where
+exactly 5 were expected - not a duplicate-sequence bug, a duplicate-DECISION
+bug. Fixing that needs the "is this decision actually new" check itself to
+be atomic and shared across writers, not just the counter.
 
-Used identically in BOTH the seed (first-run) and incremental branches of
-record_lineage_event.sql, not just the incremental one: the seed branch used
-to hardcode `1 as event_sequence` directly, which is what this allocator
-also returns for a record_token's first-ever call (its row starts at 0) -
-but hardcoding it there instead of allocating it would leave the allocator
-table not knowing that value was ever handed out, so the *next* incremental
-run would allocate 1 again for the same record_token and silently duplicate
-it. Routing both branches through the same allocator keeps the table and
-the ledger's actual per-record_token max always in sync by construction.
+HOW (v2): next_event_sequence_if_new(record_token, decision_fingerprint)
+folds BOTH the "is this decision actually new" check and the sequence
+allocation into ONE atomic Postgres statement against a dedicated allocator
+table (lineage_seq.record_lineage_event_seq, now tracking each
+record_token's last-allocated decision_fingerprint alongside its counter) -
+reached via a direct psycopg2 connection to the same Postgres server that
+already backs the DuckLake catalog, deliberately bypassing DuckDB/DuckLake
+entirely for this operation.
 
-KNOWN LIMITATION: this allocates atomically but does not participate in
-DuckDB's own transaction - if the surrounding `dbt run`'s INSERT into
-record_lineage_event fails or is rolled back AFTER this function has already
-committed an allocation (autocommit, by design - see below), that allocated
-value is spent and will never appear in the ledger, leaving a gap. The
-project's own dense/gapless sequence test
-(tests/assert_record_lineage_event_sequence_is_dense_and_unique.sql) would
-catch that if it ever happened, but it isn't expected to under this
-pipeline's normal operation: every workflow run in this repo starts from a
-freshly created Postgres database (`docker compose down -v`), so the
-allocator table and the ledger are always built up together from empty, and
-nothing here does `dbt run --full-refresh` mid-session (which would rebuild
-the ledger from nothing while leaving the allocator's counts in place,
-reintroducing exactly this kind of mismatch - not attempted here, and would
-need the allocator table truncated in step with any future full-refresh of
-this model).
+    INSERT INTO record_lineage_event_seq (record_token, next_seq, last_decision_fingerprint)
+    VALUES (%(rt)s, 1, %(fp)s)
+    ON CONFLICT (record_token) DO UPDATE
+        SET next_seq = record_lineage_event_seq.next_seq + 1,
+            last_decision_fingerprint = %(fp)s
+        WHERE record_lineage_event_seq.last_decision_fingerprint IS DISTINCT FROM %(fp)s
+    RETURNING next_seq;
+
+Postgres takes a real row lock on the (record_token) row to evaluate the
+ON CONFLICT branch, so two concurrent callers for the same record_token are
+serialized by Postgres itself - not by anything on the DuckDB/DuckLake
+side. Whichever call commits first "wins": it updates last_decision_fingerprint
+to this decision's fingerprint and gets back a fresh, real event_sequence.
+The second call (blocked on the row lock until the first commits, thanks to
+autocommit) then re-evaluates the UPDATE's WHERE clause against the
+fingerprint the winner just wrote - which now equals its own fingerprint,
+since both writers are racing to log the identical decision - so the WHERE
+is false, Postgres's own documented "ON CONFLICT DO UPDATE ... WHERE"
+behavior is to touch nothing and return no row, and this function returns
+None (SQL NULL) to the loser. The model filters those NULLs out before its
+final INSERT, so only ONE row is ever appended for a given (record_token,
+decision_fingerprint) pair, regardless of how many writers raced on it -
+this is what actually fixes the duplicate-decision bug the first version
+of this function left open, not just the duplicate-event_sequence one.
+
+A genuinely NEW decision for a record_token that already has a DIFFERENT
+last_decision_fingerprint on file (a real transition, e.g. scenario 13's
+quarantine -> trusted correction) hits the same WHERE clause, finds it
+true, and proceeds normally - this mechanism only suppresses re-logging the
+literal same decision twice, exactly the retry-safety property this
+model's docstring already claims record_lineage_event has, now made safe
+under real concurrent writers too, not just retries of a single writer.
+
+KNOWN LIMITATION: this allocates/records atomically but does not
+participate in DuckDB's own transaction - if the surrounding `dbt run`'s
+INSERT into record_lineage_event fails or is rolled back AFTER this
+function has already committed a "new decision" allocation (autocommit, by
+design - see below), that decision is marked as logged in the allocator
+table but never actually appears in the ledger, and will never be retried
+(the allocator would report it as already-logged on the next run). Not
+expected under this pipeline's normal operation: every workflow run in this
+repo starts from a freshly created Postgres database (`docker compose
+down -v`), so the allocator table and the ledger are always built up
+together from empty, and nothing here does `dbt run --full-refresh`
+mid-session (which would rebuild the ledger from nothing while leaving the
+allocator's state in place, reintroducing exactly this kind of mismatch -
+not attempted here, and would need the allocator table truncated in step
+with any future full-refresh of this model).
 """
 
 import os
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import psycopg2
 from dbt.adapters.duckdb.plugins import BasePlugin
@@ -72,15 +104,25 @@ _DDL = """
 CREATE SCHEMA IF NOT EXISTS lineage_seq;
 CREATE TABLE IF NOT EXISTS lineage_seq.record_lineage_event_seq (
     record_token varchar PRIMARY KEY,
-    next_seq bigint NOT NULL DEFAULT 0
+    next_seq bigint NOT NULL DEFAULT 0,
+    last_decision_fingerprint varchar
 );
 """
 
-_ALLOCATE = """
-INSERT INTO lineage_seq.record_lineage_event_seq (record_token, next_seq)
-VALUES (%s, 1)
+# See module docstring for the full mechanism. The ON CONFLICT ... WHERE
+# clause is what makes "is this decision actually new" and "allocate the
+# next sequence number" a single atomic operation instead of two - a
+# concurrent loser's UPDATE simply doesn't match its own WHERE (the winner
+# already wrote this exact fingerprint) and RETURNING yields no row.
+_ALLOCATE_IF_NEW = """
+INSERT INTO lineage_seq.record_lineage_event_seq
+    (record_token, next_seq, last_decision_fingerprint)
+VALUES (%(record_token)s, 1, %(decision_fingerprint)s)
 ON CONFLICT (record_token) DO UPDATE
-    SET next_seq = record_lineage_event_seq.next_seq + 1
+    SET next_seq = record_lineage_event_seq.next_seq + 1,
+        last_decision_fingerprint = %(decision_fingerprint)s
+    WHERE record_lineage_event_seq.last_decision_fingerprint
+        IS DISTINCT FROM %(decision_fingerprint)s
 RETURNING next_seq;
 """
 
@@ -105,23 +147,52 @@ class Plugin(BasePlugin):
     def initialize(self, plugin_config: Dict[str, Any]):
         # autocommit: each allocation is its own standalone Postgres
         # transaction, committed immediately - what makes the row lock this
-        # call takes visible to the OTHER process's own connection the
-        # instant this call returns, rather than held open until some later,
-        # unrelated commit on this same connection.
+        # call takes (and the fingerprint it writes) visible to the OTHER
+        # process's own connection the instant this call returns, rather
+        # than held open until some later, unrelated commit on this same
+        # connection.
         self._conn = _connect()
         self._conn.autocommit = True
         with self._conn.cursor() as cur:
-            cur.execute(_DDL)
+            try:
+                cur.execute(_DDL)
+            except (
+                psycopg2.errors.DuplicateObject,
+                psycopg2.errors.DuplicateSchema,
+                psycopg2.errors.DuplicateTable,
+                psycopg2.errors.UniqueViolation,
+            ):
+                # Two dbt run processes starting at once (the exact shape
+                # scenario 14 exercises) can both run this same "CREATE ...
+                # IF NOT EXISTS" DDL concurrently against a schema/table
+                # that doesn't exist yet - CREATE ... IF NOT EXISTS is NOT
+                # actually race-free under concurrent execution (a
+                # documented Postgres gotcha: both sessions can pass the
+                # existence check before either commits its own CREATE).
+                # Confirmed here directly, not hypothetically, by racing
+                # two local processes against a freshly dropped
+                # schema/table repeatedly: CREATE SCHEMA IF NOT EXISTS lost
+                # this race as a bare UniqueViolation on
+                # pg_namespace_nspname_index (not DuplicateSchema, despite
+                # what the SQLSTATE tables suggest it "should" raise), and
+                # CREATE TABLE IF NOT EXISTS lost it as DuplicateObject -
+                # catching all four is deliberately broad, not guesswork:
+                # whichever process lost this race, the schema/table exists
+                # now either way, and autocommit means this failed
+                # statement didn't leave the connection in an
+                # aborted-transaction state, so simply proceeding is
+                # correct, not a masked error.
+                pass
         # Defense in depth, not the primary safety mechanism: the real
         # cross-process guarantee comes from Postgres's own row lock in
-        # _ALLOCATE above, which holds regardless of what happens on the
-        # DuckDB side. This lock only protects against DuckDB itself
+        # _ALLOCATE_IF_NEW above, which holds regardless of what happens on
+        # the DuckDB side. This lock only protects against DuckDB itself
         # invoking this Python UDF from more than one of its own internal
         # worker threads concurrently *within a single query* (independent
         # of dbt's threads: config, which governs cross-MODEL parallelism,
         # not intra-query worker threads) - guarding the one psycopg2
-        # connection/cursor this plugin instance holds, which is not
-        # safe for concurrent use from multiple threads at once.
+        # connection/cursor this plugin instance holds, which is not safe
+        # for concurrent use from multiple threads at once.
         self._lock = threading.Lock()
 
     def configure_connection(self, conn: DuckDBPyConnection):
@@ -131,13 +202,19 @@ class Plugin(BasePlugin):
         # begin with.
         conn.execute("PRAGMA threads=1")
         conn.create_function(
-            "next_event_sequence",
-            self._next_event_sequence,
-            ["VARCHAR"],
+            "next_event_sequence_if_new",
+            self._next_event_sequence_if_new,
+            ["VARCHAR", "VARCHAR"],
             "BIGINT",
         )
 
-    def _next_event_sequence(self, record_token: str) -> int:
+    def _next_event_sequence_if_new(
+        self, record_token: str, decision_fingerprint: str
+    ) -> Optional[int]:
         with self._lock, self._conn.cursor() as cur:
-            cur.execute(_ALLOCATE, (record_token,))
-            return cur.fetchone()[0]
+            cur.execute(
+                _ALLOCATE_IF_NEW,
+                {"record_token": record_token, "decision_fingerprint": decision_fingerprint},
+            )
+            row = cur.fetchone()
+            return row[0] if row is not None else None

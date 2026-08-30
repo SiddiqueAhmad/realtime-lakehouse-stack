@@ -17,7 +17,7 @@ dependencies = [
     # first time in this migration (e2e-pipeline.yml run 33257478754).
     "pandas>=2.0",
     # Used directly (not through dbt-duckdb) by
-    # warehouse/duckdb_plugins/lineage_seq_udf.py's next_event_sequence()
+    # warehouse/duckdb_plugins/lineage_seq_udf.py's next_event_sequence_if_new()
     # UDF: a real atomic INSERT ... ON CONFLICT ... RETURNING against a
     # dedicated allocator table in the same Postgres server that backs the
     # DuckLake catalog, deliberately bypassing DuckDB/DuckLake so the

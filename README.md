@@ -189,36 +189,58 @@ JVM query server, no separate object-store service, no REST catalog service
    real race instead needs two separate `dbt run` *processes* both writing
    that same model concurrently — a scenario no `threads:` setting, at any
    value, has any bearing on.
-   **`event_sequence` itself is now fixed, not just documented as a gap**:
-   `reliability-tests/14_ducklake_concurrent_writers.md` first *confirmed*
-   the race for real (two independent `dbt run` processes racing to write
-   `record_lineage_event` produced 6 duplicate `(record_token,
-   event_sequence)` pairs in
+   **`event_sequence` itself is now fixed, not just documented as a gap —
+   in two passes, not one.** `reliability-tests/14_ducklake_concurrent_writers.md`
+   first *confirmed* the race for real (two independent `dbt run`
+   processes racing to write `record_lineage_event` produced 6 duplicate
+   `(record_token, event_sequence)` pairs in
    [33301445564](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301445564) —
    DuckLake's own conflict-and-retry did *not* catch it, confirming the
    suspicion below: its OCC operates at the storage/snapshot level, not at
    the level of two transactions' newly-appended rows sharing a logical
    `event_sequence` value, so two non-colliding appends are, to DuckLake,
-   two uncontested writes. The fix moved `event_sequence` allocation to
-   exactly the mechanism this note used to say it would need: a real
-   compare-and-swap on a dedicated allocator table (`next_event_sequence()`,
-   a Python UDF — see `warehouse/duckdb_plugins/lineage_seq_udf.py`) —
-   reached via a direct `psycopg2` connection to the same Postgres server
-   that backs the DuckLake catalog, deliberately bypassing DuckDB/DuckLake
-   for this one operation so the increment gets Postgres's own row-level
-   locking instead of DuckLake's snapshot-level conflict resolution.
+   two uncontested writes). A first fix allocated a genuinely unique
+   `event_sequence` per call via a compare-and-swap allocator table, which
+   did stop that collision — but the *next* real run of the same scenario
+   caught a second bug that fix left open: both writers still
+   independently read their own pre-race snapshot of the ledger and both
+   concluded a given decision hadn't been logged yet, so both inserted a
+   row for it (10 logged decisions where 5 were expected — a
+   duplicate-*decision* bug, not a duplicate-sequence one; allocating a
+   unique counter value doesn't stop two writers from both deciding to use
+   one).
+   The actual fix folds BOTH checks — "is this decision actually new" and
+   "allocate the next sequence number" — into one atomic Postgres statement:
+   `next_event_sequence_if_new(record_token, decision_fingerprint)`, a
+   Python UDF (see `warehouse/duckdb_plugins/lineage_seq_udf.py`) doing a
+   real compare-and-swap against a dedicated allocator table, keyed on each
+   record_token's last-logged decision_fingerprint — reached via a direct
+   `psycopg2` connection to the same Postgres server that backs the
+   DuckLake catalog, deliberately bypassing DuckDB/DuckLake so the check
+   gets Postgres's own row-level locking instead of DuckLake's
+   snapshot-level conflict resolution. A race's loser gets `NULL` back and
+   that row is dropped before it ever reaches the model's own `INSERT` —
+   this is what actually stops two writers from both logging the same
+   decision, not just from colliding on the same sequence number.
    Verified locally (this sandbox has no route to `extensions.duckdb.org`,
    so the fix couldn't be exercised through a live DuckLake attach here —
    the real proof is the scenario 14 CI step) by running the identical
    allocator DDL/UPSERT against a real local Postgres from two separate OS
-   processes racing on the same `record_token`: 600 concurrent allocations,
-   zero duplicates. The one documented residual limitation: an allocation
-   that commits (autocommit, by design) but is then never used because the
-   surrounding `dbt run`'s own insert aborts afterward would leave a gap —
-   not expected under this pipeline's normal operation (every workflow run
-   starts from a freshly created Postgres database) and would only matter
-   alongside a future `dbt run --full-refresh` of this model, which nothing
-   here does today. See that module's own docstring for the full case.
+   processes: 300 concurrent calls racing on the identical decision
+   produced exactly 1 non-null (winning) result, and a 2-writer/5-decision
+   race matching the CI scenario exactly produced exactly 5 logged
+   decisions across 20 repeated trials, with no crashes — including a
+   documented Postgres gotcha this testing surfaced directly: `CREATE ...
+   IF NOT EXISTS` is not itself race-free under concurrent execution (two
+   sessions can both pass the existence check before either commits), now
+   handled explicitly. The one documented residual limitation: an
+   allocation that commits (autocommit, by design) but is then never used
+   because the surrounding `dbt run`'s own insert aborts afterward would
+   leave a gap — not expected under this pipeline's normal operation (every
+   workflow run starts from a freshly created Postgres database) and would
+   only matter alongside a future `dbt run --full-refresh` of this model,
+   which nothing here does today. See that module's own docstring for the
+   full case.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC

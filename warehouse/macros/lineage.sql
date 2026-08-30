@@ -86,3 +86,24 @@
     {{ generate_source_event_id(table_expr, natural_key_expr, tx_id_expr, tx_total_order_expr, lsn_expr) }} as source_event_id,
     {{ pipeline_run_id() }}                                    as pipeline_run_id
 {% endmacro %}
+
+{% macro record_lineage_event_decision_fingerprint(record_token_expr, source_event_id_expr, quality_status_expr, failed_checks_expr, is_trusted_expr, is_quarantined_expr) %}
+    -- Deterministic hash of exactly the fields models/gold/record_lineage_event.sql's
+    -- own change-detection compares on. Factored out into one macro (rather
+    -- than inlined separately in that model's seed branch, incremental
+    -- branch, and final SELECT, as earlier versions did) specifically so
+    -- next_event_sequence_if_new() - which needs this SAME fingerprint
+    -- value as an input, computed once, before the model's own final
+    -- SELECT - can never drift from what actually gets stored in the
+    -- decision_fingerprint column. See that model's own docstring/
+    -- CONCURRENCY CONTRACT comment for why the fingerprint has to be
+    -- computed before, not after, the atomic allocation check.
+    sha256(
+        {{ record_token_expr }} || ':' ||
+        coalesce({{ source_event_id_expr }}, '') || ':' ||
+        {{ quality_status_expr }} || ':' ||
+        coalesce({{ failed_checks_expr }}, '') || ':' ||
+        cast({{ is_trusted_expr }} as varchar) || ':' ||
+        cast({{ is_quarantined_expr }} as varchar)
+    )
+{% endmacro %}

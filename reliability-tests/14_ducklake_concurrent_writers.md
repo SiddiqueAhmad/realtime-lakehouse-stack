@@ -87,15 +87,26 @@ database-native sequence, or a compare-and-swap on a dedicated allocator
 table) before this pipeline could ever run more than one writer against
 the same catalog at a time.
 
-**RESOLVED:** the first real run of this scenario failed exactly this way
-(6 duplicate `(record_token, event_sequence)` pairs — see
+**RESOLVED (in two passes, not one):** the first real run of this scenario
+failed exactly this way (6 duplicate `(record_token, event_sequence)`
+pairs — see
 [run 33301445564](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301445564)).
-`event_sequence` is now allocated via `next_event_sequence()`, a Python UDF
-(`warehouse/duckdb_plugins/lineage_seq_udf.py`) implementing exactly the
-compare-and-swap-on-a-dedicated-allocator-table fix named above, against
-the same Postgres server that backs the DuckLake catalog. This scenario
-stays in the workflow as the standing regression check for that fix, not
-as a still-open question.
+A first fix allocated a genuinely unique `event_sequence` per call
+(`next_event_sequence()`) via a compare-and-swap allocator table, which
+stopped the sequence collision — but the *next* real run of this same
+scenario caught a second bug that fix left open: both writers still
+independently read their own pre-race snapshot of this model's own table
+and both concluded a given decision hadn't been logged yet, so both
+inserted a row for it (10 logged decisions where exactly 5 were expected —
+a duplicate-*decision* bug, not a duplicate-sequence one). `event_sequence`
+is now allocated via `next_event_sequence_if_new(record_token,
+decision_fingerprint)`, a Python UDF
+(`warehouse/duckdb_plugins/lineage_seq_udf.py`) that folds the "is this
+decision actually new" check into the SAME atomic Postgres statement as
+the allocation, against the same Postgres server that backs the DuckLake
+catalog — a race's loser gets `NULL` back and its row is dropped before it
+ever reaches this model's `INSERT`. This scenario stays in the workflow as
+the standing regression check for that fix, not as a still-open question.
 
 **Automated as:** the "scenario 14" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job). One race, five newly-pending decisions racing

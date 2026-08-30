@@ -785,7 +785,7 @@ jobs:
           dup_seq=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM (SELECT record_token, event_sequence FROM gold.record_lineage_event GROUP BY record_token, event_sequence HAVING count(*) > 1)" \
             2>/dev/null | tail -n1)
-          [ "${dup_seq:-0}" = "0" ] || fail "scenario 14: found $dup_seq (record_token, event_sequence) pair(s) logged more than once under concurrent writers - next_event_sequence()'s atomic allocator (warehouse/duckdb_plugins/lineage_seq_udf.py) failed to serialize this race (see record_lineage_event.sql's CONCURRENCY CONTRACT comment)."
+          [ "${dup_seq:-0}" = "0" ] || fail "scenario 14: found $dup_seq (record_token, event_sequence) pair(s) logged more than once under concurrent writers - next_event_sequence_if_new()'s atomic allocator (warehouse/duckdb_plugins/lineage_seq_udf.py) failed to serialize this race (see record_lineage_event.sql's CONCURRENCY CONTRACT comment)."
 
           dup_key=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT count(*) FROM (SELECT ledger_key FROM gold.record_lineage_event GROUP BY ledger_key HAVING count(*) > 1)" \

@@ -103,17 +103,30 @@
 -- from DuckLake's point of view, two entirely uncontested writes, so it
 -- does not catch this as a conflict.
 --
--- event_sequence is now allocated via next_event_sequence(record_token), a
--- Python UDF (warehouse/duckdb_plugins/lineage_seq_udf.py) that performs a
--- real atomic compare-and-swap against a dedicated allocator table
--- (lineage_seq.record_lineage_event_seq) in the same Postgres server that
--- backs the DuckLake catalog - reached directly via psycopg2, bypassing
--- DuckDB/DuckLake for this one operation so the increment is a single
--- Postgres statement with a genuine row lock, not something DuckLake's
--- snapshot-level OCC has to (and doesn't) catch. See that module's own
--- docstring for the full mechanism and its one documented known
--- limitation (a gap on an aborted DuckDB transaction after a successful
--- allocation).
+-- event_sequence is now allocated via next_event_sequence_if_new(record_token,
+-- decision_fingerprint), a Python UDF (warehouse/duckdb_plugins/lineage_seq_udf.py)
+-- that performs a real atomic check-and-allocate against a dedicated
+-- allocator table (lineage_seq.record_lineage_event_seq) in the same
+-- Postgres server that backs the DuckLake catalog - reached directly via
+-- psycopg2, bypassing DuckDB/DuckLake for this operation so it gets a
+-- genuine Postgres row lock, not something DuckLake's snapshot-level OCC
+-- has to (and doesn't) catch.
+--
+-- NOTE: allocating a unique event_sequence per call is necessary but NOT
+-- sufficient - a first version of this fix did only that, and the very
+-- next real concurrent-writer run caught the gap it left open: both
+-- writers still independently concluded (from their own, pre-race
+-- snapshot of {{ this }}) that a given decision hadn't been logged yet, so
+-- both inserted a row for it - each got its own distinct, non-colliding
+-- event_sequence, but the SAME decision was logged twice. The fix folds
+-- "is this decision actually new" into the SAME atomic Postgres statement
+-- as the allocation (keyed on decision_fingerprint, computed up front via
+-- macros/lineage.sql's record_lineage_event_decision_fingerprint() so it's
+-- available before, not after, the allocation call) - the race's loser
+-- gets NULL back, and `changed`'s outer filter drops that row before it
+-- ever reaches the INSERT. See that module's own docstring for the full
+-- mechanism and its one documented known limitation (a gap on an aborted
+-- DuckDB transaction after a successful allocation).
 --
 -- IMPORTANT DISTINCTION, corrected after an earlier version of this note
 -- got it wrong: this race is NOT what warehouse/profiles.yml's threads: 1
@@ -181,7 +194,7 @@ last_logged_current as (
 
 ),
 
-changed as (
+changed_candidates as (
 
     select
         c.*,
@@ -189,7 +202,7 @@ changed as (
         l.is_trusted           as previous_is_trusted,
         l.is_quarantined       as previous_is_quarantined,
         l.decision_fingerprint as previous_decision_fingerprint,
-        next_event_sequence(c.record_token) as event_sequence
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -197,6 +210,26 @@ changed as (
        or l.is_trusted      is distinct from c.is_trusted
        or l.is_quarantined  is distinct from c.is_quarantined
        or l.source_event_id is distinct from c.source_event_id
+
+),
+
+-- The WHERE below is what actually enforces "no duplicate decision under
+-- concurrent writers" (see the CONCURRENCY CONTRACT comment above):
+-- next_event_sequence_if_new() returns NULL exactly when some other writer
+-- already logged this record_token's identical decision_fingerprint first
+-- - dropping that row here, before it ever reaches this model's own
+-- INSERT, is what stops both writers from appending a row for the same
+-- decision.
+changed as (
+
+    select *
+    from (
+        select
+            *,
+            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+        from changed_candidates
+    )
+    where event_sequence is not null
 
 )
 
@@ -208,14 +241,14 @@ changed as (
 -- before this model was added (those were never durably logged anywhere
 -- and can't be recovered; see the limitation above). No prior decision
 -- exists for any of these rows, so previous_* is null for all of them.
--- event_sequence still goes through the same next_event_sequence()
+-- event_sequence still goes through the same next_event_sequence_if_new()
 -- allocator the incremental branch uses below (see the CONCURRENCY
 -- CONTRACT comment above), not a hardcoded 1: the allocator's per-
--- record_token counter starts at zero, so a record_token's first-ever call
--- here already returns 1 — but calling it is what teaches the allocator
--- table that value has been spent, so the *next* incremental run doesn't
--- hand out 1 again for the same record_token and silently duplicate it.
-changed as (
+-- record_token counter starts at zero and has no fingerprint on file yet,
+-- so a record_token's first-ever call here already returns 1 — but calling
+-- it is what teaches the allocator table that decision has been logged, so
+-- the *next* incremental run doesn't treat it as new and duplicate it.
+changed_candidates as (
 
     select
         c.*,
@@ -223,8 +256,21 @@ changed as (
         cast(null as boolean) as previous_is_trusted,
         cast(null as boolean) as previous_is_quarantined,
         cast(null as varchar) as previous_decision_fingerprint,
-        next_event_sequence(c.record_token) as event_sequence
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
     from current_state c
+
+),
+
+changed as (
+
+    select *
+    from (
+        select
+            *,
+            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+        from changed_candidates
+    )
+    where event_sequence is not null
 
 )
 
@@ -235,14 +281,12 @@ select
     record_token,
     record_token || ':' || cast(event_sequence as varchar) as ledger_key,
     event_sequence,
-    sha256(
-        record_token || ':' ||
-        coalesce(source_event_id, '') || ':' ||
-        quality_status || ':' ||
-        coalesce(failed_checks, '') || ':' ||
-        cast(is_trusted as varchar) || ':' ||
-        cast(is_quarantined as varchar)
-    ) as decision_fingerprint,
+    -- Computed once, up in changed_candidates (see
+    -- macros/lineage.sql's record_lineage_event_decision_fingerprint()) -
+    -- not recomputed here - specifically so this column can never drift
+    -- from the exact fingerprint value next_event_sequence_if_new() was
+    -- called with to decide whether this row is a genuinely new decision.
+    decision_fingerprint,
     previous_decision_fingerprint,
     -- Human-readable "what changed", read straight off the row instead of
     -- reconstructed by joining this table to itself: "(new)" for a
