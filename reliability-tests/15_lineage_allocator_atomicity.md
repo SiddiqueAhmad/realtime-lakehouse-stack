@@ -109,17 +109,35 @@ scenario 14 in the same workflow without disturbing either one.
 
 ## What this scenario does and does not prove
 
-Confirms the allocator itself — the actual mechanism enforcing
-`record_lineage_event`'s concurrency contract — serializes correctly well
-beyond scenario 14's specific 2-writer shape, correctly handles a genuine
-decision transition racing on itself, and doesn't cross-contaminate
-unrelated `record_token`s under concurrent load. It does **not** replace
-scenario 14: this scenario never touches DuckDB/DuckLake at all, so it
-says nothing about whether the *pipeline* (dbt models, DuckLake's own
-catalog writes, the native-crash risk `warehouse/profiles.yml`'s own
-`threads: 1` comment documents) is safe under concurrency — only that the
-Postgres-backed allocator those pipeline writers depend on is. Read the
-two scenarios together, not as substitutes for each other.
+Precisely, not just loosely — a review of PR #10 flagged that "multi-writer
+correctness" undersells what's actually two different, narrower claims
+plus one still-open question, so state each one exactly:
+
+- **Scenario 14 proves:** end-to-end multi-writer behavior through the
+  real pipeline — `dbt` → DuckDB/DuckLake → the `record_lineage_event`
+  ledger — via two genuine, independent `dbt run` processes racing to
+  write the same catalog.
+- **Scenario 15 (this one) proves:** concurrency correctness of the
+  Postgres-backed lineage sequence/idempotency allocator
+  (`next_event_sequence_if_new`) itself — that it serializes racing
+  callers correctly (same decision, different decisions, many writers,
+  many unrelated tokens) — exercised directly, never touching
+  DuckDB/DuckLake at all. It does not say anything about whether the
+  *pipeline* (dbt models, DuckLake's own catalog writes, the native-crash
+  risk `warehouse/profiles.yml`'s own `threads: 1` comment documents) is
+  safe under concurrency — only that the allocator those pipeline writers
+  depend on is.
+- **Neither proves:** atomic durability of "allocate, then DuckLake
+  `INSERT`" as one transaction. That's exactly check 4 above — a
+  characterization of a known, open gap, not a demonstration that it's
+  closed. Closing it is a separate, legitimate architectural question
+  (two-phase commit across DuckDB and Postgres, vs. a reconciliation pass
+  that detects and repairs an allocated-but-never-logged decision) for a
+  future change, not something either scenario claims to answer.
+
+Read scenarios 14 and 15 together, not as substitutes for each other —
+and read both alongside that third bullet before calling the lineage
+mechanism's concurrency story complete.
 
 **Automated as:** the "scenario 15" step in `.github/workflows/e2e-pipeline.yml`
 (`infra-setup/scripts/lineage_allocator_concurrency_test.py`), immediately

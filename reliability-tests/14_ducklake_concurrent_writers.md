@@ -138,15 +138,32 @@ meant to) catch two non-overlapping appends that happen to carry the same
 *application-level* value. So scenario 14 is a real test of "two
 independent processes can safely race to write the same DuckLake catalog
 table" *given* this allocator, not evidence that DuckLake alone enforces
-this specific business invariant. Read together with the allocator
-module's own docstring (see its "KNOWN LIMITATION" section: the allocator
-commits its Postgres allocation and the DuckDB ledger insert as two
-separate transactions, not one atomic unit), this scenario is the
-regression check for the fix through the real pipeline, not a full
-concurrency qualification suite by itself - see
-`15_lineage_allocator_atomicity.md` for the same-`record_token`-different-
-decision race, the higher-writer-count stress sweep, and the executable
-characterization of the allocator's documented allocate-then-DuckDB-
-insert-fails gap, all exercised directly against the allocator. A fix (as
-opposed to a characterization) for that gap itself remains legitimate,
-unaddressed follow-up work.
+this specific business invariant.
+
+State this precisely, not just loosely (a review of PR #10 flagged that
+"multi-writer correctness" undersells what's actually two narrower claims
+plus one still-open question):
+
+- **Scenario 14 (this one) proves:** end-to-end multi-writer behavior
+  through the real pipeline - `dbt` -> DuckDB/DuckLake -> the
+  `record_lineage_event` ledger - via two genuine, independent `dbt run`
+  processes racing to write the same catalog.
+- **Scenario 15 proves:** concurrency correctness of the Postgres-backed
+  allocator itself (`15_lineage_allocator_atomicity.md`) - the
+  same-`record_token`-different-decision race, the higher-writer-count
+  stress sweep, and cross-token isolation this scenario's own dbt-run-
+  based setup can't produce, all exercised directly against the
+  allocator rather than through this scenario's slower full-pipeline
+  approach.
+- **Neither proves:** atomic durability of "allocate, then DuckLake
+  `INSERT`" as one transaction - see the allocator module's own
+  docstring ("KNOWN LIMITATION": the allocator commits its Postgres
+  allocation and the DuckDB ledger insert as two separate transactions,
+  not one atomic unit) and scenario 15's check 4, which characterizes
+  that gap directly rather than claiming it's closed. A fix (as opposed
+  to a characterization) for it remains legitimate, unaddressed follow-up
+  work.
+
+Read scenarios 14 and 15 together, not as substitutes for each other, and
+read both alongside that third bullet before calling the lineage
+mechanism's concurrency story complete.

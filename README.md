@@ -250,7 +250,13 @@ JVM query server, no separate object-store service, no REST catalog service
    and the same-`record_token`-different-decision race scenario 14's own
    dbt-run-based setup can't produce, both directly against the allocator
    rather than through a much slower full-pipeline `dbt run` per
-   iteration.
+   iteration. **Stated precisely, not just as "multi-writer correctness":**
+   scenario 14 proves end-to-end multi-writer behavior through the real
+   `dbt` -> DuckDB/DuckLake -> ledger pipeline; scenario 15 proves
+   concurrency correctness of the Postgres-backed allocator itself,
+   exercised directly; **neither** proves atomic durability of "allocate,
+   then DuckDB `INSERT`" as one transaction - that gap stays open, only
+   now CI-characterized rather than merely documented.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC
