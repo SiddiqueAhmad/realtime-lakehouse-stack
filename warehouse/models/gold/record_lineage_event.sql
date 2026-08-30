@@ -89,6 +89,20 @@
 -- appends for a given record_token, independent of what bronze or the
 -- clock are doing.
 --
+-- CONCURRENCY CONTRACT: event_sequence's own arithmetic (read the current
+-- max via last_logged_current, then +1) is only correct under a single
+-- serialized writer against this catalog - see README.md's "DuckLake
+-- writes are serialized" known gap. Two concurrent dbt runs against the
+-- same DuckLake catalog could both read the same prior value for a
+-- record_token and both compute the same next one; nothing in this model
+-- detects or prevents that race. This is safe today because
+-- warehouse/profiles.yml pins threads: 1 and nothing else writes to this
+-- catalog concurrently - not because of any property of this column's own
+-- read-then-add-one logic. A real concurrent-writer requirement would need
+-- event_sequence allocation to move to something with actual atomic-
+-- increment semantics (a database-native sequence, or a compare-and-swap
+-- on a dedicated allocator table), not this pattern.
+--
 -- DELETED as a quality_status value: record_lineage deliberately leaves
 -- quality_status null for a record whose current bronze row is a delete
 -- tombstone (its own docstring: "or neither, if the record was deleted

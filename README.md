@@ -159,6 +159,20 @@ JVM query server, no separate object-store service, no REST catalog service
    pins `threads: 1` to avoid that entirely. Treat this deployment as a
    single serialized writer with multiple readers, not a generally
    concurrency-safe warehouse; revisit once that upstream issue is fixed.
+   This isn't just a performance constraint — `gold.record_lineage_event`'s
+   `event_sequence` (read-current-max, then +1, per `record_token`; see
+   that model's own docstring) is correct only under a single serialized
+   writer per catalog. Two concurrent `dbt run` invocations against the
+   same DuckLake catalog could both read the same prior sequence value for
+   a record_token and both compute the same next value, which the model
+   has no mechanism to detect or prevent on its own — it relies entirely on
+   `threads: 1` (and on nothing else writing to this catalog at the same
+   time) to make that race impossible, not on any property of
+   `event_sequence`'s own arithmetic. If this pipeline ever needs true
+   concurrent writers to the same catalog, `event_sequence` allocation
+   would need to move to a mechanism with real atomic-increment semantics
+   (a database-native sequence, or a compare-and-swap on a dedicated
+   allocator table) rather than a same-transaction read-then-add-one.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC
