@@ -69,10 +69,47 @@
 -- LAG()/self-join over this table. Null previous_* means this is the
 -- first decision ever logged for the record_token (matches the "(new)"
 -- case in decision_transition below), not a missing value.
-
+--
+-- event_sequence: this ledger's OWN monotonic counter per record_token (1,
+-- 2, 3, ...), assigned here rather than borrowed from logged_at or
+-- pipeline_run_id. Both of those look like they'd order/dedupe history
+-- correctly and don't: pipeline_run_id is inherited from record_lineage,
+-- which inherits it straight from bronze's stored value at merge time (see
+-- record_lineage.sql's b.pipeline_run_id) - it names which run last wrote
+-- this record's OWN row, not which run logged THIS ledger entry. The
+-- referenced-record case two paragraphs up (a diagnosis's decision flips
+-- because the patient it references now exists, not because the
+-- diagnosis's own row changed) is exactly where that breaks: the
+-- diagnosis's bronze row - and so its pipeline_run_id - never changes, so
+-- two real, distinct, differently-timed ledger entries for the same
+-- record_token could carry the identical pipeline_run_id. logged_at
+-- (wall-clock at append time) doesn't have that specific failure mode, but
+-- offers no formal uniqueness guarantee either. event_sequence does: it's
+-- this model's own counter, incremented once per row this model itself
+-- appends for a given record_token, independent of what bronze or the
+-- clock are doing.
+--
+-- DELETED as a quality_status value: record_lineage deliberately leaves
+-- quality_status null for a record whose current bronze row is a delete
+-- tombstone (its own docstring: "or neither, if the record was deleted
+-- before ever reaching a quality decision") - sl_* is a view filtered to
+-- `where not is_deleted`, so a deleted record simply has no row there to
+-- join against, for any record's delete, not just a pre-decision one.
+-- That's the right current-state answer for record_lineage (there IS no
+-- live quality decision for a deleted record), but it's the wrong answer
+-- here: decision_fingerprint/decision_transition need a real value to
+-- hash and print, and a delete is itself a legitimate, auditable decision
+-- to log - arguably the most important one scenario 4 exists to prove
+-- ("delete handling / auditability"), not a gap to route around. So this
+-- model remaps null-because-deleted to the literal status 'DELETED' right
+-- at the source (current_state), rather than threading a null-check
+-- through every place quality_status gets used below.
 with current_state as (
 
-    select * from {{ ref('record_lineage') }}
+    select
+        * exclude (quality_status),
+        case when is_deleted then 'DELETED' else quality_status end as quality_status
+    from {{ ref('record_lineage') }}
 
 ),
 
@@ -87,9 +124,10 @@ last_logged as (
         is_quarantined,
         source_event_id,
         decision_fingerprint,
+        event_sequence,
         row_number() over (
             partition by record_token
-            order by logged_at desc, pipeline_run_id desc
+            order by event_sequence desc
         ) as _rn
     from {{ this }}
 
@@ -108,7 +146,8 @@ changed as (
         l.quality_status       as previous_quality_status,
         l.is_trusted           as previous_is_trusted,
         l.is_quarantined       as previous_is_quarantined,
-        l.decision_fingerprint as previous_decision_fingerprint
+        l.decision_fingerprint as previous_decision_fingerprint,
+        coalesce(l.event_sequence, 0) + 1 as event_sequence
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -126,7 +165,10 @@ changed as (
 -- ledger's start-of-history point, not a reconstruction of decisions made
 -- before this model was added (those were never durably logged anywhere
 -- and can't be recovered; see the limitation above). No prior decision
--- exists for any of these rows, so previous_* is null for all of them.
+-- exists for any of these rows, so previous_* is null for all of them, and
+-- every row is event_sequence 1 for its record_token (record_lineage has
+-- at most one row per record_token, so there's no ordering to get wrong
+-- here even before event_sequence exists to enforce it elsewhere).
 changed as (
 
     select
@@ -134,7 +176,8 @@ changed as (
         cast(null as varchar) as previous_quality_status,
         cast(null as boolean) as previous_is_trusted,
         cast(null as boolean) as previous_is_quarantined,
-        cast(null as varchar) as previous_decision_fingerprint
+        cast(null as varchar) as previous_decision_fingerprint,
+        1 as event_sequence
     from current_state c
 
 )
@@ -144,7 +187,8 @@ changed as (
 select
     dataset,
     record_token,
-    record_token || ':' || pipeline_run_id as ledger_key,
+    record_token || ':' || cast(event_sequence as varchar) as ledger_key,
+    event_sequence,
     sha256(
         record_token || ':' ||
         coalesce(source_event_id, '') || ':' ||
@@ -158,12 +202,24 @@ select
     -- reconstructed by joining this table to itself: "(new)" for a
     -- record_token's first-ever logged decision, otherwise
     -- "<prior status>/<trusted|quarantined> -> <new status>/<trusted|quarantined>".
+    -- DELETED is printed bare (no "/trusted"|"/quarantined" suffix) -
+    -- is_trusted/is_quarantined are just false/false for a deleted record
+    -- (nothing to be trusted or quarantined), so appending either word
+    -- would misleadingly imply a quality-gate outcome that was never
+    -- computed.
     coalesce(
-        previous_quality_status || '/' ||
-            (case when previous_is_trusted then 'trusted' else 'quarantined' end),
+        case
+            when previous_quality_status = 'DELETED' then 'DELETED'
+            when previous_quality_status is not null then
+                previous_quality_status || '/' ||
+                    (case when previous_is_trusted then 'trusted' else 'quarantined' end)
+        end,
         '(new)'
-    ) || ' -> ' || quality_status || '/' ||
-        (case when is_trusted then 'trusted' else 'quarantined' end) as decision_transition,
+    ) || ' -> ' ||
+        case
+            when quality_status = 'DELETED' then 'DELETED'
+            else quality_status || '/' || (case when is_trusted then 'trusted' else 'quarantined' end)
+        end as decision_transition,
     source_event_id,
     pipeline_run_id,
     cdc_operation,

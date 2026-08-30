@@ -104,15 +104,34 @@ models:
       a record's decision actually changes from the last one logged for it,
       not on every run. See the model's own docstring, including its
       documented limitation (one entry per dbt run in which a decision
-      changed, not one per underlying CDC event).
+      changed, not one per underlying CDC event). quality_status here is
+      'DELETED' (never null) for a record whose current bronze row is a
+      delete tombstone, distinct from record_lineage's own quality_status
+      for the same record_token, which is null in that case - see the
+      model's own docstring for why the two intentionally diverge.
     columns:
       - name: ledger_key
-        # record_token || ':' || pipeline_run_id. Unique because record_lineage
-        # (this model's source) has at most one row per record_token per run,
-        # and pipeline_run_id is one value per dbt invocation. This is a
-        # traceability label (which run observed the change), not what
-        # enforces retry-safety - see decision_fingerprint for that.
+        # record_token || ':' || event_sequence. Previously built from
+        # pipeline_run_id instead of event_sequence, which was NOT actually
+        # unique: pipeline_run_id is inherited from bronze's stored value at
+        # merge time (see record_lineage.sql), so two ledger entries for the
+        # same record_token both logged while its own bronze row is
+        # unchanged - exactly the "referenced record changed" case this
+        # model's docstring describes, and exactly what scenario 13
+        # exercises - could share a pipeline_run_id and so collide on this
+        # key. event_sequence is this model's own per-record_token counter
+        # (see record_lineage_event.sql's own comment), which can't collide
+        # by construction. This is a traceability label, not what enforces
+        # retry-safety - see decision_fingerprint for that.
         tests: [not_null, unique]
+      - name: event_sequence
+        # This ledger's own 1, 2, 3, ... counter per record_token - the
+        # actual total order over a record_token's history, independent of
+        # bronze's pipeline_run_id or wall-clock logged_at (see
+        # record_lineage_event.sql's comment for why those aren't safe to
+        # order/dedupe on). See
+        # tests/assert_record_lineage_event_sequence_is_dense_and_unique.sql.
+        tests: [not_null]
       - name: decision_fingerprint
         # sha256 of the fields the model's own change-detection compares on
         # (record_token/source_event_id/quality_status/failed_checks/

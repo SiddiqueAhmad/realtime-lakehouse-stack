@@ -82,11 +82,18 @@ stand up.
 DuckDB/DuckLake), runs `dbt run` for real, and asserts every scenario's
 outcome by querying bronze/silver/quality/gold tables through DuckDB
 (`infra-setup/scripts/dq.py`) — including, now, scenarios **10** (pipeline
-replay — snapshot `gold.cdc_volume_summary` and `gold.record_lineage_event`,
-re-run with no new writes, assert both are unchanged) and **11** (partial
-CDC failure — kill the `debezium` container, write a new row directly to
-`ehr` while it's confirmed down, restart it, assert the row lands exactly
-once with no gap or duplicate delivery). Scenario 12 remains a manual
+replay — content-address `gold.record_lineage` and `gold.record_lineage_event`
+with `sha256()` over their actual row data, not just row counts, re-run with
+no new writes, assert the hashes are unchanged) and **11** (partial CDC
+failure — kill the `debezium` container, write a new row directly to `ehr`
+while it's confirmed down, restart it, assert the row lands exactly once
+with no gap or duplicate delivery). The workflow also re-runs the full
+`dbt test` suite immediately after scenario 13 — not just once at the
+start — because scenario 13 is the one case that changes a record's logged
+decision without touching that record's own bronze row (see its own file's
+comment), which is exactly the condition that let a real `ledger_key`
+uniqueness bug through undetected before (see Validation history below).
+Scenario 12 remains a manual
 runbook only (its claim is largely 01/03's dedup/ordering guarantee taken
 across a longer outage, which 01/03 and now 11 already cover from different
 angles). Scenario 08 (minimum-necessary access control) is NOT covered —
@@ -123,3 +130,23 @@ The workflow has since run fully green end-to-end, scenarios 01–13
 keep treating individual runs as validation to read the evidence from, not
 as proof the pipeline is settled, until it's been promoted to a required
 PR check and stayed green there for a while.
+
+A tenth bug turned up on the next pass, in review rather than in CI: the
+first version of `record_lineage_event`'s `ledger_key` was
+`record_token || ':' || pipeline_run_id`, believed unique because
+`record_lineage` has at most one row per `record_token` per run. That's
+true, but `pipeline_run_id` is inherited from bronze's *stored* value at
+merge time, not recomputed per ledger append — so two ledger entries for
+the same `record_token`, logged in two different runs while that record's
+own bronze row stays untouched (exactly scenario 13's case: a diagnosis's
+decision flips because the *referenced* patient row now exists, not
+because the diagnosis's own row changed), could carry the identical
+`pipeline_run_id` and collide on `ledger_key`. It went uncaught in the
+first green run because `dbt test` only ran once, before any scenario had
+executed — scenario 13 always ran after it, so the `unique` test on
+`ledger_key` never saw the collision it would have flagged. Fixed by
+giving the ledger its own `event_sequence` counter (independent of both
+`pipeline_run_id` and wall-clock `logged_at` — see
+`record_lineage_event.sql`'s comment) and adding a `dbt test` re-run
+immediately after scenario 13 specifically so this class of bug can't hide
+behind "the one scenario that would catch it just wasn't re-tested."
