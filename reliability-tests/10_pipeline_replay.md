@@ -31,10 +31,13 @@
 **Automated as:** the "scenario 10" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job) — snapshot `gold.cdc_volume_summary`'s per-entity
 row/event counts as a cheap first check, then content-address
-`gold.record_lineage` (every entity's current decision) and
-`gold.record_lineage_event` (the full ledger) with `sha256()` over their
-actual row content, re-run `dbt run --profiles-dir .` with no new writes,
-and assert all three are unchanged. The row-count snapshot alone would pass
-even if replay reshuffled or corrupted individual rows while preserving
-counts — the content hashes are what actually proves byte-for-byte
-identity, not just "nothing was added or dropped."
+`gold.record_lineage` and `gold.record_lineage_event` with `sha256()` over
+`t::varchar` (DuckDB's whole-row-to-struct cast on the FROM alias) —
+literally every column of every row, not a hand-picked subset — re-run
+`dbt run --profiles-dir .` with no new writes, and assert all three are
+unchanged. The row-count snapshot alone would pass even if replay
+reshuffled or corrupted individual rows while preserving counts; an
+earlier version of the content hash covered only a few named columns and
+would have missed a change to any column left off that list — `t::varchar`
+closes that gap structurally, by construction, rather than by remembering
+to keep a column list in sync with the model's schema.
