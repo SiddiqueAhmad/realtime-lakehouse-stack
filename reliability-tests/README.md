@@ -1,6 +1,6 @@
 # Reliability test suite
 
-Thirteen scenarios that exercise the CDC reliability engine
+Fourteen scenarios that exercise the CDC reliability engine
 (`warehouse/macros/cdc_reliability.sql`), the data quality gates
 (`warehouse/macros/data_quality.sql`), and lineage (`warehouse/macros/lineage.sql`)
 against the questions the platform needs to be able to answer:
@@ -37,6 +37,7 @@ pipeline can pass one while failing another:
 | 11 | Partial CDC failure | `11_partial_cdc_failure.md` | crash recovery |
 | 12 | Reprocessing after outage | `12_reprocessing_after_outage.md` | offset resumption + ordering — manual only; see its own file, largely the same claim as 01/03 (which are automated) taken across a full outage/recovery cycle rather than a single insert |
 | 13 | Corrected referential integrity | `13_quarantine_correction.sql` | historical lineage — quarantine → trusted transition, both retained |
+| 14 | DuckLake concurrent writers | `14_ducklake_concurrent_writers.md` | catalog-level write concurrency — two independent processes racing to log the same pending decisions, specifically `event_sequence`'s safety under real concurrency (not `threads:`, which is a different question — see the file's own explanation) |
 
 Connection defaults used below: Postgres on `localhost:5433` (db=`ehr` for
 the OLTP source, db=`warehouse` for the raw CDC landing schema and DuckLake
@@ -87,7 +88,12 @@ with `sha256()` over their actual row data, not just row counts, re-run with
 no new writes, assert the hashes are unchanged) and **11** (partial CDC
 failure — kill the `debezium` container, write a new row directly to `ehr`
 while it's confirmed down, restart it, assert the row lands exactly once
-with no gap or duplicate delivery). The workflow also re-runs the full
+with no gap or duplicate delivery), and **14** (DuckLake concurrent
+writers — two independent `dbt run` processes racing to log the same set
+of newly-pending decisions into `record_lineage_event`, asserting no
+duplicate `event_sequence`/`ledger_key` and no lost decisions; see that
+scenario's own file for why this is a genuinely different question from
+`threads:`). The workflow also re-runs the full
 `dbt test` suite immediately after scenario 13 — not just once at the
 start — because scenario 13 is the one case that changes a record's logged
 decision without touching that record's own bronze row (see its own file's
@@ -150,3 +156,21 @@ giving the ledger its own `event_sequence` counter (independent of both
 `record_lineage_event.sql`'s comment) and adding a `dbt test` re-run
 immediately after scenario 13 specifically so this class of bug can't hide
 behind "the one scenario that would catch it just wasn't re-tested."
+
+The DuckLake concurrent-write crash cited above (`duckdb/ducklake#233`)
+was re-tested directly rather than left as a stale citation once that
+upstream issue closed: `warehouse/profiles.yml`'s `threads` was flipped
+back to 4 and the real e2e pipeline run three times. Two runs passed
+clean; the third crashed with the identical signature as the original
+report (`Segmentation fault (core dumped)`, exit 139, on two different
+models writing the DuckLake catalog concurrently) — see
+`warehouse/profiles.yml`'s own comment for the three run IDs. So the
+honest, current, re-verified answer is **intermittent, not fixed**:
+`threads: 1` stays required. That finding also exposed a second,
+previously-unstated gap this project's own docs were conflating:
+`threads:` (intra-invocation parallelism across *different* models, which
+is what crashed) has nothing to do with whether `record_lineage_event`'s
+own `event_sequence` is safe under two separate `dbt run` *processes*
+racing on the *same* model — a genuinely different question `threads:`
+can't answer at any value. Scenario 14 is the actual test of that
+question.

@@ -152,44 +152,60 @@ JVM query server, no separate object-store service, no REST catalog service
    `gold.*`/`deid.*` today means running `infra-setup/scripts/dq.py`
    directly (see "Quick Start" below) or `dbt show`.
 3. **This deployment serializes DuckLake writes (`threads: 1`); DuckLake
-   itself is not single-writer by design.** DuckLake coordinates writers
-   through optimistic concurrency control against its SQL catalog
+   itself is not single-writer by design, but this stack's own re-test
+   confirms it still needs to serialize today.** DuckLake coordinates
+   writers through optimistic concurrency control against its SQL catalog
    (Postgres here) — no locks, conflicting commits get rejected and
    retried — and explicitly supports multiple concurrent writers as an
    architectural feature, not something bolted on. What actually happened:
-   a real run of this pipeline segfaulted the one time it exercised
-   concurrent DuckLake writes, and `warehouse/profiles.yml` pins
-   `threads: 1` to avoid that entirely. Two upstream reports from around
-   that time describe real concurrent-write instability in the
-   duckdb/ducklake engine build we hit this on (`duckdb/ducklake#233`,
-   `#243`) — both now CLOSED and fixed upstream, and neither describes a
-   crash/segfault specifically, so this project never pinned its own
-   segfault to either issue's exact mechanism, only confirmed that
-   `threads: 1` eliminates it. With both cited issues since fixed, this is
-   worth re-testing directly (not assumed resolved) before ever removing
-   the setting. Until then, treat this deployment as a single serialized
-   writer with multiple readers by its own conservative choice, not as
-   proof of a DuckLake limitation.
-   This isn't just a performance constraint — `gold.record_lineage_event`'s
-   `event_sequence` (read-current-max, then +1, per `record_token`; see
-   that model's own docstring) is correct only under a single serialized
-   writer per catalog. Two concurrent `dbt run` invocations against the
-   same DuckLake catalog could both read the same prior sequence value for
-   a record_token and both compute the same next value, which the model
-   has no mechanism to detect or prevent on its own — it relies entirely on
-   `threads: 1` (and on nothing else writing to this catalog at the same
-   time) to make that race impossible, not on any property of
-   `event_sequence`'s own arithmetic, and not on DuckLake's own
-   conflict-and-retry — that operates at the storage/snapshot level and
-   isn't guaranteed to catch this specific application-level race just
-   because DuckLake supports concurrent writers generally. If this
-   pipeline ever needs true concurrent writers to the same catalog,
-   `event_sequence` allocation would need its own explicit safety net — a
-   verified reliance on DuckLake's conflict detection actually catching
-   this case, or a mechanism with real atomic-increment semantics (a
-   database-native sequence, or a compare-and-swap on a dedicated
-   allocator table) — rather than assuming concurrent-writer support alone
-   makes a same-transaction read-then-add-one safe.
+   a real run of this pipeline segfaulted the first time it exercised
+   concurrent DuckLake writes (two upstream reports from around that time,
+   `duckdb/ducklake#233` and `#243`, describe related concurrent-write
+   instability and are both now closed/fixed, though neither describes a
+   crash/segfault specifically). **Re-tested directly** rather than assumed
+   resolved: flipped `threads` back to 4 (its pre-hardening value) and ran
+   the real e2e pipeline three times. Two runs
+   ([33300464909](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33300464909),
+   [33300714850](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33300714850))
+   passed clean; the third
+   ([33301008146](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301008146))
+   crashed with the identical signature — `Segmentation fault (core dumped)`,
+   exit 139 — on the same shape of command (two different models building
+   concurrently). So the honest, current answer is: **intermittent, not
+   fixed** — roughly 1 crash in 3 real attempts, not a reliable reproduction
+   but not resolved either. `threads: 1` stays required until a real,
+   larger sample of runs on a current build comes back clean, or the
+   upstream instability is more definitively closed. Treat this deployment
+   as a single serialized writer with multiple readers by its own
+   conservative, now re-verified choice, not as proof of a DuckLake
+   limitation, and not as proof the crash is gone.
+   This is a *separate* concern from `gold.record_lineage_event`'s own
+   `event_sequence` race (read-current-max, then +1, per `record_token`;
+   see that model's own docstring) — worth not conflating, which an earlier
+   version of this note did. `threads:` controls *intra-invocation*
+   parallelism (how many different models one `dbt run` process builds at
+   once — which is what crashes above); dbt's own scheduler already
+   guarantees any single model, `record_lineage_event` included, is built
+   by exactly one thread per invocation regardless of `threads` value. The
+   `event_sequence` race instead needs two separate `dbt run` *processes*
+   both writing that same model concurrently — a scenario no `threads:`
+   setting, at any value, has any bearing on. What actually protects
+   against that race today is purely this project's own operational
+   practice of never launching two overlapping `dbt run` invocations
+   against this catalog — not enforced by any lock or config here, just
+   consistently true so far. `reliability-tests/14_ducklake_concurrent_writers.md`
+   is this project's actual test of that specific race (real, independent
+   processes racing to write `record_lineage_event`), not this `threads:`
+   setting. Nor is DuckLake's own conflict-and-retry a safety net here by
+   default — it operates at the storage/snapshot level, with no verified
+   guarantee it would catch two writers landing on the same
+   `event_sequence` value for the same `record_token` as a conflict. A real
+   concurrent-writer requirement would need either that guarantee
+   explicitly verified, or `event_sequence` allocation moved to a mechanism
+   with real atomic-increment semantics (a database-native sequence, or a
+   compare-and-swap on a dedicated allocator table) — rather than assuming
+   concurrent-writer support alone makes a same-transaction
+   read-then-add-one safe.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC

@@ -91,24 +91,41 @@
 --
 -- CONCURRENCY CONTRACT: event_sequence's own arithmetic (read the current
 -- max via last_logged_current, then +1) is only correct under a single
--- serialized writer against this catalog - see README.md's DuckLake
--- concurrency known gap. Two concurrent dbt runs against the same
--- DuckLake catalog could both read the same prior value for a
--- record_token and both compute the same next one; nothing in this model
--- detects or prevents that race. This is safe today because
--- warehouse/profiles.yml pins threads: 1 and nothing else writes to this
--- catalog concurrently - not because DuckLake can't do concurrent writers
--- (it's explicitly designed to, via optimistic concurrency control against
--- its SQL catalog) and not because of any property of this column's own
--- read-then-add-one logic. DuckLake's own conflict-and-retry operates at
--- the storage/snapshot level, and there's no verified guarantee it would
--- catch two writers landing on the same event_sequence value for the same
--- record_token as a conflict. A real concurrent-writer requirement would
--- need either that guarantee explicitly verified, or event_sequence
--- allocation moved to something with actual atomic-increment semantics
--- (a database-native sequence, or a compare-and-swap on a dedicated
--- allocator table) - not an assumption that DuckLake's general
--- concurrent-writer support covers this specific case for free.
+-- writer against this catalog - see README.md's DuckLake concurrency known
+-- gap. Two concurrent WRITERS OF THIS MODEL could both read the same prior
+-- value for a record_token and both compute the same next one; nothing in
+-- this model detects or prevents that race.
+--
+-- IMPORTANT DISTINCTION, corrected after an earlier version of this note
+-- got it wrong: this is NOT what warehouse/profiles.yml's threads: 1
+-- protects against. threads: controls INTRA-invocation parallelism - how
+-- many DIFFERENT models one `dbt run` process builds concurrently - and
+-- dbt's own DAG scheduler already guarantees a single model (this one
+-- included) is only ever built once, by one thread, per invocation,
+-- regardless of the threads value. The race above needs two separate `dbt
+-- run` PROCESSES both building record_lineage_event at the same time,
+-- which no threads: setting at any value prevents. What actually protects
+-- against it today is purely this project's own operational practice of
+-- only ever launching one dbt invocation against this catalog at a time -
+-- not enforced by any lock or config here, just consistently true so far.
+-- reliability-tests/14_ducklake_concurrent_writers.md is this project's
+-- actual test of that race (real, independent processes racing to write
+-- record_lineage_event) - not threads:, which tests something else
+-- entirely (see profiles.yml's own comment on the native crash that DOES
+-- reproduce under threads > 1, a separate, lower-level stability question
+-- from this one).
+--
+-- DuckLake's own conflict-and-retry (it explicitly supports concurrent
+-- writers via optimistic concurrency control against its SQL catalog -
+-- this is not a DuckLake limitation) operates at the storage/snapshot
+-- level, and there's no verified guarantee it would catch two writers
+-- landing on the same event_sequence value for the same record_token as a
+-- conflict. A real concurrent-writer requirement would need either that
+-- guarantee explicitly verified (see the scenario above), or event_sequence
+-- allocation moved to something with actual atomic-increment semantics (a
+-- database-native sequence, or a compare-and-swap on a dedicated allocator
+-- table) - not an assumption that DuckLake's general concurrent-writer
+-- support covers this specific case for free.
 --
 -- DELETED as a quality_status value: record_lineage deliberately leaves
 -- quality_status null for a record whose current bronze row is a delete
