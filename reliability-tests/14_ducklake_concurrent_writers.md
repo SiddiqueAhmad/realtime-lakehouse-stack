@@ -114,3 +114,33 @@ at once — a real signal, not an exhaustive stress matrix (a much larger
 sweep across writer counts, e.g. 2/4/8/16+ concurrent writers over many
 iterations, would give a stronger statistical answer and is legitimate
 follow-up work, not something this single CI step claims to replace).
+
+A writer crash (per "Expected" above) hard-fails this step - the assert
+step captures both writers' real exit codes via `wait $pid` and treats a
+non-zero exit as a required failure, not just a warning, after first
+printing the resulting table state as a diagnostic (a crashed writer can
+still leave the table looking clean if it dies after its own inserts land,
+which is precisely why the crash itself has to fail the run rather than
+being inferred from table state).
+
+**What this scenario does and does not prove:** DuckLake's own concurrent-
+writer support (its OCC across independent `dbt run` processes appending
+to the same catalog) is real and is what makes this scenario's *setup*
+safe to run at all. But the actual invariant this scenario's assertions
+check - no duplicate `event_sequence`, no duplicate `ledger_key`, no
+duplicate/lost decision - is enforced by `next_event_sequence_if_new()`'s
+Postgres-backed allocator (`warehouse/duckdb_plugins/lineage_seq_udf.py`),
+not by DuckLake itself; DuckLake's catalog-level OCC does not (and isn't
+meant to) catch two non-overlapping appends that happen to carry the same
+*application-level* value. So scenario 14 is a real test of "two
+independent processes can safely race to write the same DuckLake catalog
+table" *given* this allocator, not evidence that DuckLake alone enforces
+this specific business invariant. Read together with the allocator
+module's own docstring (see its "KNOWN LIMITATION" section: the allocator
+commits its Postgres allocation and the DuckDB ledger insert as two
+separate transactions, not one atomic unit), this scenario is the
+regression check for the fix, not a full concurrency qualification suite -
+a same-`record_token`-different-decision race, a stress sweep across
+higher writer counts, and a test of the allocator's documented
+allocate-then-DuckDB-insert-fails gap all remain legitimate, unaddressed
+follow-up work.

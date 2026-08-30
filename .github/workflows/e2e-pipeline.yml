@@ -778,8 +778,10 @@ jobs:
 
           exit_a=$(cat /tmp/scenario14_exit_a.txt)
           exit_b=$(cat /tmp/scenario14_exit_b.txt)
+          writer_crashed=false
           if [ "$exit_a" != "0" ] || [ "$exit_b" != "0" ]; then
-            echo "::warning::scenario 14: at least one concurrent writer exited non-zero (A=$exit_a, B=$exit_b) - see the previous step's logs. This is a real finding (possibly the same intermittent native crash confirmed under threads>1 in this environment, now under two separate processes), not necessarily a bug in this assertion step - continuing to check the resulting table state regardless."
+            writer_crashed=true
+            echo "::error::scenario 14: at least one concurrent writer exited non-zero (A=$exit_a, B=$exit_b) - see the previous step's logs. This is itself a real finding (possibly the same intermittent native crash confirmed under threads>1 in this environment, now under two separate processes), not a bug in this assertion step - checking the resulting table state below purely for diagnostics before failing."
           fi
 
           dup_seq=$(.venv/bin/python3 infra-setup/scripts/dq.py \
@@ -797,7 +799,21 @@ jobs:
             2>/dev/null | tail -n1)
           [ "${logged_n:-0}" = "5" ] || fail "scenario 14: expected exactly 5 logged FAIL decisions (one per new diagnosis, from whichever writer's insert actually landed), got $logged_n - either some were lost (both writers somehow missed one) or duplicated."
 
-          echo "Scenario 14 passed: two concurrent, independent record_lineage_event writers raced on 5 newly-pending decisions with no duplicate event_sequence, no duplicate ledger_key, and no lost decisions."
+          # The table-state assertions above passing does NOT excuse a
+          # crashed writer: a writer that dies after logging its own share
+          # of decisions but before the other writer even starts can leave
+          # this table looking perfectly clean (no duplicates, all 5
+          # logged) while still being a genuine multi-writer reliability
+          # failure - one of the two writers this scenario exists to prove
+          # can safely race did not, in fact, survive the race. Fail here,
+          # after the diagnostics above have already been printed, rather
+          # than upgrading the earlier `::error::` to a hard failure
+          # immediately - table state is worth seeing either way.
+          if [ "$writer_crashed" = "true" ]; then
+            fail "scenario 14: table state looks clean, but at least one concurrent writer crashed (A=$exit_a, B=$exit_b) - see the ::error:: above and the previous step's logs. A writer crash is not something this scenario can pass through as a warning: it is exactly the kind of multi-writer reliability failure this test exists to catch."
+          fi
+
+          echo "Scenario 14 passed: two concurrent, independent record_lineage_event writers raced on 5 newly-pending decisions with no duplicate event_sequence, no duplicate ledger_key, and no lost decisions, and neither writer crashed."
 
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
