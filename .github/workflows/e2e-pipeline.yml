@@ -815,6 +815,23 @@ jobs:
 
           echo "Scenario 14 passed: two concurrent, independent record_lineage_event writers raced on 5 newly-pending decisions with no duplicate event_sequence, no duplicate ledger_key, and no lost decisions, and neither writer crashed."
 
+      - name: Run scenario 15 (lineage allocator concurrency + atomicity gap)
+        # reliability-tests/15_lineage_allocator_atomicity.md, automated.
+        # Direct concurrency tests of the Postgres allocator behind
+        # scenario 14's fix (next_event_sequence_if_new(), see
+        # warehouse/duckdb_plugins/lineage_seq_udf.py) - real concurrency
+        # shapes scenario 14's dbt-run-based setup cannot produce (higher
+        # writer counts, a same-record_token-different-decision race,
+        # cross-token isolation under load), plus an executable
+        # characterization of that module's one documented known
+        # limitation. Uses its own dedicated, uuid-based synthetic
+        # record_token values - cannot collide with scenario 14's or any
+        # real record_token - so ordering relative to scenario 14 doesn't
+        # matter. The script's own exit code is this step's pass/fail
+        # signal (it prints its own ::error::), matching dq.py's pattern
+        # elsewhere in this job.
+        run: .venv/bin/python3 infra-setup/scripts/lineage_allocator_concurrency_test.py
+
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
         # multi-service pipeline. Every service's log, plus dbt's own log,

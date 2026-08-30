@@ -110,10 +110,13 @@ the standing regression check for that fix, not as a still-open question.
 
 **Automated as:** the "scenario 14" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job). One race, five newly-pending decisions racing
-at once — a real signal, not an exhaustive stress matrix (a much larger
-sweep across writer counts, e.g. 2/4/8/16+ concurrent writers over many
-iterations, would give a stronger statistical answer and is legitimate
-follow-up work, not something this single CI step claims to replace).
+at once through the real pipeline — a real signal, not an exhaustive
+stress matrix. `15_lineage_allocator_atomicity.md` (the very next step in
+the same job) covers the broader statistical sweep across writer counts,
+a same-`record_token`-different-decision race, and cross-token isolation
+under load, directly against the allocator this scenario's fix depends
+on, rather than through a much slower full-pipeline `dbt run` per
+iteration.
 
 A writer crash (per "Expected" above) hard-fails this step - the assert
 step captures both writers' real exit codes via `wait $pid` and treats a
@@ -139,8 +142,11 @@ this specific business invariant. Read together with the allocator
 module's own docstring (see its "KNOWN LIMITATION" section: the allocator
 commits its Postgres allocation and the DuckDB ledger insert as two
 separate transactions, not one atomic unit), this scenario is the
-regression check for the fix, not a full concurrency qualification suite -
-a same-`record_token`-different-decision race, a stress sweep across
-higher writer counts, and a test of the allocator's documented
-allocate-then-DuckDB-insert-fails gap all remain legitimate, unaddressed
-follow-up work.
+regression check for the fix through the real pipeline, not a full
+concurrency qualification suite by itself - see
+`15_lineage_allocator_atomicity.md` for the same-`record_token`-different-
+decision race, the higher-writer-count stress sweep, and the executable
+characterization of the allocator's documented allocate-then-DuckDB-
+insert-fails gap, all exercised directly against the allocator. A fix (as
+opposed to a characterization) for that gap itself remains legitimate,
+unaddressed follow-up work.

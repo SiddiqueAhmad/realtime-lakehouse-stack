@@ -240,7 +240,17 @@ JVM query server, no separate object-store service, no REST catalog service
    workflow run starts from a freshly created Postgres database) and would
    only matter alongside a future `dbt run --full-refresh` of this model,
    which nothing here does today. See that module's own docstring for the
-   full case.
+   full case. **This gap is now an executable, CI-checked characterization,
+   not just a docstring claim** — `reliability-tests/15_lineage_allocator_atomicity.md`
+   (scenario 15, automated as the step right after scenario 14 in
+   `e2e-pipeline.yml`) reproduces exactly this sequence directly against
+   the allocator and asserts the retry comes back suppressed, so any
+   silent drift in this behavior (either direction) fails CI. That same
+   scenario also covers the broader statistical sweep across writer counts
+   and the same-`record_token`-different-decision race scenario 14's own
+   dbt-run-based setup can't produce, both directly against the allocator
+   rather than through a much slower full-pipeline `dbt run` per
+   iteration.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC
