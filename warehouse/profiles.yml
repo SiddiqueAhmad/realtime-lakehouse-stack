@@ -104,4 +104,10 @@ warehouse:
       # to one thread avoids any concurrent DuckLake write in this pipeline
       # entirely; the dataset here is synthetic test fixtures, so the lost
       # parallelism costs nothing that matters.
-      threads: 1
+      # TEMPORARY, for this branch only: flipped back to the original 4
+      # (pre-15a8f98) to re-test whether the segfault still reproduces now
+      # that duckdb/ducklake#233 and #243 are closed upstream. Will be
+      # reverted to 1 (with updated docs either way) once the real
+      # e2e-pipeline.yml result is in - see the comment above for the full
+      # history this is testing.
+      threads: 4
