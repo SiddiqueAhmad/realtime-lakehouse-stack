@@ -110,7 +110,60 @@ the standing regression check for that fix, not as a still-open question.
 
 **Automated as:** the "scenario 14" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job). One race, five newly-pending decisions racing
-at once — a real signal, not an exhaustive stress matrix (a much larger
-sweep across writer counts, e.g. 2/4/8/16+ concurrent writers over many
-iterations, would give a stronger statistical answer and is legitimate
-follow-up work, not something this single CI step claims to replace).
+at once through the real pipeline — a real signal, not an exhaustive
+stress matrix. `15_lineage_allocator_atomicity.md` (the very next step in
+the same job) covers the broader statistical sweep across writer counts,
+a same-`record_token`-different-decision race, and cross-token isolation
+under load, directly against the allocator this scenario's fix depends
+on, rather than through a much slower full-pipeline `dbt run` per
+iteration.
+
+A writer crash (per "Expected" above) hard-fails this step - the assert
+step captures both writers' real exit codes via `wait $pid` and treats a
+non-zero exit as a required failure, not just a warning, after first
+printing the resulting table state as a diagnostic (a crashed writer can
+still leave the table looking clean if it dies after its own inserts land,
+which is precisely why the crash itself has to fail the run rather than
+being inferred from table state).
+
+**What this scenario does and does not prove:** DuckLake's own concurrent-
+writer support (its OCC across independent `dbt run` processes appending
+to the same catalog) is real and is what makes this scenario's *setup*
+safe to run at all. But the actual invariant this scenario's assertions
+check - no duplicate `event_sequence`, no duplicate `ledger_key`, no
+duplicate/lost decision - is enforced by `next_event_sequence_if_new()`'s
+Postgres-backed allocator (`warehouse/duckdb_plugins/lineage_seq_udf.py`),
+not by DuckLake itself; DuckLake's catalog-level OCC does not (and isn't
+meant to) catch two non-overlapping appends that happen to carry the same
+*application-level* value. So scenario 14 is a real test of "two
+independent processes can safely race to write the same DuckLake catalog
+table" *given* this allocator, not evidence that DuckLake alone enforces
+this specific business invariant.
+
+State this precisely, not just loosely (a review of PR #10 flagged that
+"multi-writer correctness" undersells what's actually two narrower claims
+plus one still-open question):
+
+- **Scenario 14 (this one) proves:** end-to-end multi-writer behavior
+  through the real pipeline - `dbt` -> DuckDB/DuckLake -> the
+  `record_lineage_event` ledger - via two genuine, independent `dbt run`
+  processes racing to write the same catalog.
+- **Scenario 15 proves:** concurrency correctness of the Postgres-backed
+  allocator itself (`15_lineage_allocator_atomicity.md`) - the
+  same-`record_token`-different-decision race, the higher-writer-count
+  stress sweep, and cross-token isolation this scenario's own dbt-run-
+  based setup can't produce, all exercised directly against the
+  allocator rather than through this scenario's slower full-pipeline
+  approach.
+- **Neither proves:** atomic durability of "allocate, then DuckLake
+  `INSERT`" as one transaction - see the allocator module's own
+  docstring ("KNOWN LIMITATION": the allocator commits its Postgres
+  allocation and the DuckDB ledger insert as two separate transactions,
+  not one atomic unit) and scenario 15's check 4, which characterizes
+  that gap directly rather than claiming it's closed. A fix (as opposed
+  to a characterization) for it remains legitimate, unaddressed follow-up
+  work.
+
+Read scenarios 14 and 15 together, not as substitutes for each other, and
+read both alongside that third bullet before calling the lineage
+mechanism's concurrency story complete.
