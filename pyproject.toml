@@ -16,4 +16,14 @@ dependencies = [
     # wasn't installed" once it actually reached a live database for the
     # first time in this migration (e2e-pipeline.yml run 33257478754).
     "pandas>=2.0",
+    # Used directly (not through dbt-duckdb) by
+    # warehouse/duckdb_plugins/lineage_seq_udf.py's next_event_sequence()
+    # UDF: a real atomic INSERT ... ON CONFLICT ... RETURNING against a
+    # dedicated allocator table in the same Postgres server that backs the
+    # DuckLake catalog, deliberately bypassing DuckDB/DuckLake so the
+    # increment gets Postgres's own row-level locking instead of DuckLake's
+    # snapshot-level conflict resolution (see that module's docstring for
+    # why the latter doesn't catch this race). -binary avoids needing
+    # Postgres build tooling/headers in CI and local dev alike.
+    "psycopg2-binary>=2.9",
 ]

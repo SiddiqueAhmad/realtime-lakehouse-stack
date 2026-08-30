@@ -87,6 +87,16 @@ database-native sequence, or a compare-and-swap on a dedicated allocator
 table) before this pipeline could ever run more than one writer against
 the same catalog at a time.
 
+**RESOLVED:** the first real run of this scenario failed exactly this way
+(6 duplicate `(record_token, event_sequence)` pairs — see
+[run 33301445564](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301445564)).
+`event_sequence` is now allocated via `next_event_sequence()`, a Python UDF
+(`warehouse/duckdb_plugins/lineage_seq_udf.py`) implementing exactly the
+compare-and-swap-on-a-dedicated-allocator-table fix named above, against
+the same Postgres server that backs the DuckLake catalog. This scenario
+stays in the workflow as the standing regression check for that fix, not
+as a still-open question.
+
 **Automated as:** the "scenario 14" steps in `.github/workflows/e2e-pipeline.yml`
 (near the end of the job). One race, five newly-pending decisions racing
 at once — a real signal, not an exhaustive stress matrix (a much larger

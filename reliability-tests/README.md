@@ -173,4 +173,12 @@ is what crashed) has nothing to do with whether `record_lineage_event`'s
 own `event_sequence` is safe under two separate `dbt run` *processes*
 racing on the *same* model — a genuinely different question `threads:`
 can't answer at any value. Scenario 14 is the actual test of that
-question.
+question, and its first real run confirmed the race for real (6 duplicate
+`(record_token, event_sequence)` pairs — see
+[run 33301445564](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301445564)).
+Fixed by moving `event_sequence` allocation off same-transaction
+read-then-add-one arithmetic entirely, onto a real atomic compare-and-swap
+against a dedicated Postgres allocator table (see
+`warehouse/duckdb_plugins/lineage_seq_udf.py` and README.md's own
+known-gap entry) — a genuine cross-process lock, not something `threads:`
+or DuckLake's own OCC was ever going to provide for this specific race.

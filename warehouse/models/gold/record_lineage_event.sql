@@ -89,43 +89,47 @@
 -- appends for a given record_token, independent of what bronze or the
 -- clock are doing.
 --
--- CONCURRENCY CONTRACT: event_sequence's own arithmetic (read the current
--- max via last_logged_current, then +1) is only correct under a single
--- writer against this catalog - see README.md's DuckLake concurrency known
--- gap. Two concurrent WRITERS OF THIS MODEL could both read the same prior
--- value for a record_token and both compute the same next one; nothing in
--- this model detects or prevents that race.
+-- CONCURRENCY CONTRACT, UPDATED after reliability-tests/14_ducklake_concurrent_writers.md
+-- confirmed the race for real (e2e-pipeline.yml run 33301445564: two
+-- independent `dbt run --select record_lineage_event` processes produced 6
+-- duplicate (record_token, event_sequence) pairs): event_sequence used to
+-- be computed as plain SQL arithmetic (read the current max via
+-- last_logged_current, then +1), which is only correct under a single
+-- writer - DuckLake's own optimistic concurrency control (it explicitly
+-- supports concurrent writers via OCC against its SQL catalog - this was
+-- never a DuckLake limitation) operates at the snapshot/file level, not at
+-- the level of "did two transactions' newly-appended rows happen to carry
+-- the same logical event_sequence value" - two non-overlapping appends are,
+-- from DuckLake's point of view, two entirely uncontested writes, so it
+-- does not catch this as a conflict.
+--
+-- event_sequence is now allocated via next_event_sequence(record_token), a
+-- Python UDF (warehouse/duckdb_plugins/lineage_seq_udf.py) that performs a
+-- real atomic compare-and-swap against a dedicated allocator table
+-- (lineage_seq.record_lineage_event_seq) in the same Postgres server that
+-- backs the DuckLake catalog - reached directly via psycopg2, bypassing
+-- DuckDB/DuckLake for this one operation so the increment is a single
+-- Postgres statement with a genuine row lock, not something DuckLake's
+-- snapshot-level OCC has to (and doesn't) catch. See that module's own
+-- docstring for the full mechanism and its one documented known
+-- limitation (a gap on an aborted DuckDB transaction after a successful
+-- allocation).
 --
 -- IMPORTANT DISTINCTION, corrected after an earlier version of this note
--- got it wrong: this is NOT what warehouse/profiles.yml's threads: 1
+-- got it wrong: this race is NOT what warehouse/profiles.yml's threads: 1
 -- protects against. threads: controls INTRA-invocation parallelism - how
 -- many DIFFERENT models one `dbt run` process builds concurrently - and
 -- dbt's own DAG scheduler already guarantees a single model (this one
 -- included) is only ever built once, by one thread, per invocation,
--- regardless of the threads value. The race above needs two separate `dbt
+-- regardless of the threads value. The race here needs two separate `dbt
 -- run` PROCESSES both building record_lineage_event at the same time,
--- which no threads: setting at any value prevents. What actually protects
--- against it today is purely this project's own operational practice of
--- only ever launching one dbt invocation against this catalog at a time -
--- not enforced by any lock or config here, just consistently true so far.
+-- which no threads: setting at any value prevents or causes.
 -- reliability-tests/14_ducklake_concurrent_writers.md is this project's
 -- actual test of that race (real, independent processes racing to write
 -- record_lineage_event) - not threads:, which tests something else
 -- entirely (see profiles.yml's own comment on the native crash that DOES
 -- reproduce under threads > 1, a separate, lower-level stability question
 -- from this one).
---
--- DuckLake's own conflict-and-retry (it explicitly supports concurrent
--- writers via optimistic concurrency control against its SQL catalog -
--- this is not a DuckLake limitation) operates at the storage/snapshot
--- level, and there's no verified guarantee it would catch two writers
--- landing on the same event_sequence value for the same record_token as a
--- conflict. A real concurrent-writer requirement would need either that
--- guarantee explicitly verified (see the scenario above), or event_sequence
--- allocation moved to something with actual atomic-increment semantics (a
--- database-native sequence, or a compare-and-swap on a dedicated allocator
--- table) - not an assumption that DuckLake's general concurrent-writer
--- support covers this specific case for free.
 --
 -- DELETED as a quality_status value: record_lineage deliberately leaves
 -- quality_status null for a record whose current bronze row is a delete
@@ -185,7 +189,7 @@ changed as (
         l.is_trusted           as previous_is_trusted,
         l.is_quarantined       as previous_is_quarantined,
         l.decision_fingerprint as previous_decision_fingerprint,
-        coalesce(l.event_sequence, 0) + 1 as event_sequence
+        next_event_sequence(c.record_token) as event_sequence
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -203,10 +207,14 @@ changed as (
 -- ledger's start-of-history point, not a reconstruction of decisions made
 -- before this model was added (those were never durably logged anywhere
 -- and can't be recovered; see the limitation above). No prior decision
--- exists for any of these rows, so previous_* is null for all of them, and
--- every row is event_sequence 1 for its record_token (record_lineage has
--- at most one row per record_token, so there's no ordering to get wrong
--- here even before event_sequence exists to enforce it elsewhere).
+-- exists for any of these rows, so previous_* is null for all of them.
+-- event_sequence still goes through the same next_event_sequence()
+-- allocator the incremental branch uses below (see the CONCURRENCY
+-- CONTRACT comment above), not a hardcoded 1: the allocator's per-
+-- record_token counter starts at zero, so a record_token's first-ever call
+-- here already returns 1 — but calling it is what teaches the allocator
+-- table that value has been spent, so the *next* incremental run doesn't
+-- hand out 1 again for the same record_token and silently duplicate it.
 changed as (
 
     select
@@ -215,7 +223,7 @@ changed as (
         cast(null as boolean) as previous_is_trusted,
         cast(null as boolean) as previous_is_quarantined,
         cast(null as varchar) as previous_decision_fingerprint,
-        1 as event_sequence
+        next_event_sequence(c.record_token) as event_sequence
     from current_state c
 
 )

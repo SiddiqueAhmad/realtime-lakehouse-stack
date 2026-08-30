@@ -180,32 +180,45 @@ JVM query server, no separate object-store service, no REST catalog service
    conservative, now re-verified choice, not as proof of a DuckLake
    limitation, and not as proof the crash is gone.
    This is a *separate* concern from `gold.record_lineage_event`'s own
-   `event_sequence` race (read-current-max, then +1, per `record_token`;
-   see that model's own docstring) — worth not conflating, which an earlier
+   `event_sequence` allocation — worth not conflating, which an earlier
    version of this note did. `threads:` controls *intra-invocation*
    parallelism (how many different models one `dbt run` process builds at
    once — which is what crashes above); dbt's own scheduler already
    guarantees any single model, `record_lineage_event` included, is built
-   by exactly one thread per invocation regardless of `threads` value. The
-   `event_sequence` race instead needs two separate `dbt run` *processes*
-   both writing that same model concurrently — a scenario no `threads:`
-   setting, at any value, has any bearing on. What actually protects
-   against that race today is purely this project's own operational
-   practice of never launching two overlapping `dbt run` invocations
-   against this catalog — not enforced by any lock or config here, just
-   consistently true so far. `reliability-tests/14_ducklake_concurrent_writers.md`
-   is this project's actual test of that specific race (real, independent
-   processes racing to write `record_lineage_event`), not this `threads:`
-   setting. Nor is DuckLake's own conflict-and-retry a safety net here by
-   default — it operates at the storage/snapshot level, with no verified
-   guarantee it would catch two writers landing on the same
-   `event_sequence` value for the same `record_token` as a conflict. A real
-   concurrent-writer requirement would need either that guarantee
-   explicitly verified, or `event_sequence` allocation moved to a mechanism
-   with real atomic-increment semantics (a database-native sequence, or a
-   compare-and-swap on a dedicated allocator table) — rather than assuming
-   concurrent-writer support alone makes a same-transaction
-   read-then-add-one safe.
+   by exactly one thread per invocation regardless of `threads` value. A
+   real race instead needs two separate `dbt run` *processes* both writing
+   that same model concurrently — a scenario no `threads:` setting, at any
+   value, has any bearing on.
+   **`event_sequence` itself is now fixed, not just documented as a gap**:
+   `reliability-tests/14_ducklake_concurrent_writers.md` first *confirmed*
+   the race for real (two independent `dbt run` processes racing to write
+   `record_lineage_event` produced 6 duplicate `(record_token,
+   event_sequence)` pairs in
+   [33301445564](https://github.com/SiddiqueAhmad/realtime-lakehouse-stack/actions/runs/33301445564) —
+   DuckLake's own conflict-and-retry did *not* catch it, confirming the
+   suspicion below: its OCC operates at the storage/snapshot level, not at
+   the level of two transactions' newly-appended rows sharing a logical
+   `event_sequence` value, so two non-colliding appends are, to DuckLake,
+   two uncontested writes. The fix moved `event_sequence` allocation to
+   exactly the mechanism this note used to say it would need: a real
+   compare-and-swap on a dedicated allocator table (`next_event_sequence()`,
+   a Python UDF — see `warehouse/duckdb_plugins/lineage_seq_udf.py`) —
+   reached via a direct `psycopg2` connection to the same Postgres server
+   that backs the DuckLake catalog, deliberately bypassing DuckDB/DuckLake
+   for this one operation so the increment gets Postgres's own row-level
+   locking instead of DuckLake's snapshot-level conflict resolution.
+   Verified locally (this sandbox has no route to `extensions.duckdb.org`,
+   so the fix couldn't be exercised through a live DuckLake attach here —
+   the real proof is the scenario 14 CI step) by running the identical
+   allocator DDL/UPSERT against a real local Postgres from two separate OS
+   processes racing on the same `record_token`: 600 concurrent allocations,
+   zero duplicates. The one documented residual limitation: an allocation
+   that commits (autocommit, by design) but is then never used because the
+   surrounding `dbt run`'s own insert aborts afterward would leave a gap —
+   not expected under this pipeline's normal operation (every workflow run
+   starts from a freshly created Postgres database) and would only matter
+   alongside a future `dbt run --full-refresh` of this model, which nothing
+   here does today. See that module's own docstring for the full case.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC
