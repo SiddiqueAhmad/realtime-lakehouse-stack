@@ -605,13 +605,24 @@ jobs:
         # got added or dropped, but not that any surviving row's own
         # content is unchanged - a replay that reshuffled or corrupted
         # individual rows while preserving counts would still pass a
-        # counts-only check. Content-address gold.record_lineage (current
-        # decision for every entity, unioned - the read side of "did any
-        # record's outcome change") and gold.record_lineage_event (the full
-        # ledger, ordered by event_sequence - "did replay alter or
-        # manufacture history") with sha256 over their actual row content
-        # instead, so the after-replay assertion is a genuine byte-content
-        # comparison, not just a row-count proxy for one.
+        # counts-only check. An earlier version of this hash covered only
+        # a hand-picked subset of columns (record_token/source_event_id/
+        # quality_status/is_trusted/is_quarantined, say) - which proved
+        # "the columns I remembered to list are unchanged", not "the row is
+        # unchanged": a column left out of the list (pipeline_run_id,
+        # decision_transition, logged_at, ...) could differ silently and
+        # the hash would never notice. `t::varchar` (t being the FROM
+        # alias) casts the ENTIRE row to its struct representation - every
+        # column, automatically, with no list to fall out of sync with the
+        # model's actual schema - so sha256 over that is a genuine
+        # byte-content comparison of the whole row, not a proxy over
+        # whichever fields happened to get named. Safe to include every
+        # column, logged_at included: record_lineage_event is a true
+        # INSERT-only append (existing rows are never rewritten, so an
+        # unchanged row's logged_at can't drift), and record_lineage's
+        # pre_hook DELETE+full-reinsert reproduces byte-identical values
+        # for every column as long as the underlying source data hasn't
+        # changed - which is exactly what this scenario is asserting.
         run: |
           snapshot=$(.venv/bin/python3 infra-setup/scripts/dq.py \
             "SELECT string_agg(dataset || ':' || raw_event_count || ':' || current_row_count, ',' ORDER BY dataset) FROM gold.cdc_volume_summary" \
@@ -619,17 +630,17 @@ jobs:
           echo "$snapshot" > /tmp/scenario10_volume_snapshot.txt
 
           lineage_hash=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT sha256(string_agg(record_token || '|' || coalesce(source_event_id, '') || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token)) FROM gold.record_lineage" \
+            "SELECT sha256(string_agg(t::varchar, chr(30) ORDER BY record_token)) FROM gold.record_lineage t" \
             2>/dev/null | tail -n1)
           echo "$lineage_hash" > /tmp/scenario10_lineage_hash.txt
 
           event_hash=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT sha256(string_agg(record_token || '|' || cast(event_sequence AS varchar) || '|' || decision_fingerprint || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event" \
+            "SELECT sha256(string_agg(t::varchar, chr(30) ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event t" \
             2>/dev/null | tail -n1)
           echo "$event_hash" > /tmp/scenario10_event_hash.txt
 
           echo "Captured pre-replay volume snapshot: $snapshot"
-          echo "Captured pre-replay content hashes: record_lineage=$lineage_hash record_lineage_event=$event_hash"
+          echo "Captured pre-replay whole-row content hashes: record_lineage=$lineage_hash record_lineage_event=$event_hash"
 
       - name: Re-run the full pipeline with no new source writes (scenario 10 replay)
         working-directory: warehouse
@@ -646,17 +657,17 @@ jobs:
 
           lineage_hash_before=$(cat /tmp/scenario10_lineage_hash.txt)
           lineage_hash_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT sha256(string_agg(record_token || '|' || coalesce(source_event_id, '') || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token)) FROM gold.record_lineage" \
+            "SELECT sha256(string_agg(t::varchar, chr(30) ORDER BY record_token)) FROM gold.record_lineage t" \
             2>/dev/null | tail -n1)
-          [ "$lineage_hash_after" = "$lineage_hash_before" ] || fail "scenario 10: gold.record_lineage's content hash changed on a no-op replay (before=$lineage_hash_before after=$lineage_hash_after) - every entity's current decision must be byte-identical, not just its row count."
+          [ "$lineage_hash_after" = "$lineage_hash_before" ] || fail "scenario 10: gold.record_lineage's whole-row content hash changed on a no-op replay (before=$lineage_hash_before after=$lineage_hash_after) - every column of every row must be byte-identical, not just a hand-picked subset."
 
           event_hash_before=$(cat /tmp/scenario10_event_hash.txt)
           event_hash_after=$(.venv/bin/python3 infra-setup/scripts/dq.py \
-            "SELECT sha256(string_agg(record_token || '|' || cast(event_sequence AS varchar) || '|' || decision_fingerprint || '|' || quality_status || '|' || cast(is_trusted AS varchar) || '|' || cast(is_quarantined AS varchar), '||' ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event" \
+            "SELECT sha256(string_agg(t::varchar, chr(30) ORDER BY record_token, event_sequence)) FROM gold.record_lineage_event t" \
             2>/dev/null | tail -n1)
-          [ "$event_hash_after" = "$event_hash_before" ] || fail "scenario 10: gold.record_lineage_event's content hash changed on a no-op replay (before=$event_hash_before after=$event_hash_after) - a re-run with no source changes must not alter or manufacture ledger history."
+          [ "$event_hash_after" = "$event_hash_before" ] || fail "scenario 10: gold.record_lineage_event's whole-row content hash changed on a no-op replay (before=$event_hash_before after=$event_hash_after) - a re-run with no source changes must not alter or manufacture ledger history, in any column."
 
-          echo "Scenario 10 passed: dbt run with no new source writes is a true no-op, verified by content hash over every row's actual data - not just row counts - across both current-state and ledger history."
+          echo "Scenario 10 passed: dbt run with no new source writes is a true no-op, verified by a whole-row content hash - every column, not a hand-picked subset - across both current-state and ledger history."
 
       - name: Kill Debezium, then write a new diagnosis while it's down (scenario 11 setup)
         # reliability-tests/11_partial_cdc_failure.md, automated: rather than
