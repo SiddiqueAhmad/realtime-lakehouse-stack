@@ -90,6 +90,17 @@ mid-session (which would rebuild the ledger from nothing while leaving the
 allocator's state in place, reintroducing exactly this kind of mismatch -
 not attempted here, and would need the allocator table truncated in step
 with any future full-refresh of this model).
+
+REAL RUN CAUGHT ONE MORE THING before this was even exercised under
+concurrency: e2e-pipeline.yml run 33303628943 failed the very FIRST
+single-writer call to this function with "The returned result contained
+NULL values, but the 'null_handling' was set to DEFAULT" - DuckDB's
+create_function() default null handling filters any row with a NULL
+*input* before calling the Python function, and separately forbids the
+function from *returning* NULL at all. Returning None for a race's loser
+is this function's entire mechanism, so `null_handling=FunctionNullHandling.SPECIAL`
+is required at registration (see configure_connection() below), not
+optional - without it, this function cannot do what it exists to do.
 """
 
 import os
@@ -99,6 +110,7 @@ from typing import Any, Dict, Optional
 import psycopg2
 from dbt.adapters.duckdb.plugins import BasePlugin
 from duckdb import DuckDBPyConnection
+from duckdb.func import FunctionNullHandling
 
 _DDL = """
 CREATE SCHEMA IF NOT EXISTS lineage_seq;
@@ -206,6 +218,24 @@ class Plugin(BasePlugin):
             self._next_event_sequence_if_new,
             ["VARCHAR", "VARCHAR"],
             "BIGINT",
+            # DuckDB's DEFAULT null handling (the create_function default)
+            # filters any row with a NULL *input* before calling the Python
+            # function AND forbids the function from *returning* NULL -
+            # confirmed directly by a real e2e-pipeline.yml run
+            # (33303628943) failing every single call with "The returned
+            # result contained NULL values, but the 'null_handling' was set
+            # to DEFAULT" the instant this function first tried to return
+            # None for a race's loser. Returning NULL for exactly that case
+            # is this function's entire mechanism (see module docstring) -
+            # SPECIAL is what DuckDB calls "let the UDF see and return NULL
+            # itself", so it's required here, not optional.
+            null_handling=FunctionNullHandling.SPECIAL,
+            # This function's whole reason to exist is a side effect (an
+            # atomic write to Postgres) - telling DuckDB that explicitly
+            # stops it from treating repeated identical calls within a
+            # query as safe to cache/eliminate/reorder the way a pure
+            # function's calls would be.
+            side_effects=True,
         )
 
     def _next_event_sequence_if_new(
