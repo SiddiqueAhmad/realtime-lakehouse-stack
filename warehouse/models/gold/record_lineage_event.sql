@@ -89,26 +89,60 @@
 -- appends for a given record_token, independent of what bronze or the
 -- clock are doing.
 --
--- CONCURRENCY CONTRACT: event_sequence's own arithmetic (read the current
--- max via last_logged_current, then +1) is only correct under a single
--- serialized writer against this catalog - see README.md's DuckLake
--- concurrency known gap. Two concurrent dbt runs against the same
--- DuckLake catalog could both read the same prior value for a
--- record_token and both compute the same next one; nothing in this model
--- detects or prevents that race. This is safe today because
--- warehouse/profiles.yml pins threads: 1 and nothing else writes to this
--- catalog concurrently - not because DuckLake can't do concurrent writers
--- (it's explicitly designed to, via optimistic concurrency control against
--- its SQL catalog) and not because of any property of this column's own
--- read-then-add-one logic. DuckLake's own conflict-and-retry operates at
--- the storage/snapshot level, and there's no verified guarantee it would
--- catch two writers landing on the same event_sequence value for the same
--- record_token as a conflict. A real concurrent-writer requirement would
--- need either that guarantee explicitly verified, or event_sequence
--- allocation moved to something with actual atomic-increment semantics
--- (a database-native sequence, or a compare-and-swap on a dedicated
--- allocator table) - not an assumption that DuckLake's general
--- concurrent-writer support covers this specific case for free.
+-- CONCURRENCY CONTRACT, UPDATED after reliability-tests/14_ducklake_concurrent_writers.md
+-- confirmed the race for real (e2e-pipeline.yml run 33301445564: two
+-- independent `dbt run --select record_lineage_event` processes produced 6
+-- duplicate (record_token, event_sequence) pairs): event_sequence used to
+-- be computed as plain SQL arithmetic (read the current max via
+-- last_logged_current, then +1), which is only correct under a single
+-- writer - DuckLake's own optimistic concurrency control (it explicitly
+-- supports concurrent writers via OCC against its SQL catalog - this was
+-- never a DuckLake limitation) operates at the snapshot/file level, not at
+-- the level of "did two transactions' newly-appended rows happen to carry
+-- the same logical event_sequence value" - two non-overlapping appends are,
+-- from DuckLake's point of view, two entirely uncontested writes, so it
+-- does not catch this as a conflict.
+--
+-- event_sequence is now allocated via next_event_sequence_if_new(record_token,
+-- decision_fingerprint), a Python UDF (warehouse/duckdb_plugins/lineage_seq_udf.py)
+-- that performs a real atomic check-and-allocate against a dedicated
+-- allocator table (lineage_seq.record_lineage_event_seq) in the same
+-- Postgres server that backs the DuckLake catalog - reached directly via
+-- psycopg2, bypassing DuckDB/DuckLake for this operation so it gets a
+-- genuine Postgres row lock, not something DuckLake's snapshot-level OCC
+-- has to (and doesn't) catch.
+--
+-- NOTE: allocating a unique event_sequence per call is necessary but NOT
+-- sufficient - a first version of this fix did only that, and the very
+-- next real concurrent-writer run caught the gap it left open: both
+-- writers still independently concluded (from their own, pre-race
+-- snapshot of {{ this }}) that a given decision hadn't been logged yet, so
+-- both inserted a row for it - each got its own distinct, non-colliding
+-- event_sequence, but the SAME decision was logged twice. The fix folds
+-- "is this decision actually new" into the SAME atomic Postgres statement
+-- as the allocation (keyed on decision_fingerprint, computed up front via
+-- macros/lineage.sql's record_lineage_event_decision_fingerprint() so it's
+-- available before, not after, the allocation call) - the race's loser
+-- gets NULL back, and `changed`'s outer filter drops that row before it
+-- ever reaches the INSERT. See that module's own docstring for the full
+-- mechanism and its one documented known limitation (a gap on an aborted
+-- DuckDB transaction after a successful allocation).
+--
+-- IMPORTANT DISTINCTION, corrected after an earlier version of this note
+-- got it wrong: this race is NOT what warehouse/profiles.yml's threads: 1
+-- protects against. threads: controls INTRA-invocation parallelism - how
+-- many DIFFERENT models one `dbt run` process builds concurrently - and
+-- dbt's own DAG scheduler already guarantees a single model (this one
+-- included) is only ever built once, by one thread, per invocation,
+-- regardless of the threads value. The race here needs two separate `dbt
+-- run` PROCESSES both building record_lineage_event at the same time,
+-- which no threads: setting at any value prevents or causes.
+-- reliability-tests/14_ducklake_concurrent_writers.md is this project's
+-- actual test of that race (real, independent processes racing to write
+-- record_lineage_event) - not threads:, which tests something else
+-- entirely (see profiles.yml's own comment on the native crash that DOES
+-- reproduce under threads > 1, a separate, lower-level stability question
+-- from this one).
 --
 -- DELETED as a quality_status value: record_lineage deliberately leaves
 -- quality_status null for a record whose current bronze row is a delete
@@ -160,7 +194,7 @@ last_logged_current as (
 
 ),
 
-changed as (
+changed_candidates as (
 
     select
         c.*,
@@ -168,7 +202,7 @@ changed as (
         l.is_trusted           as previous_is_trusted,
         l.is_quarantined       as previous_is_quarantined,
         l.decision_fingerprint as previous_decision_fingerprint,
-        coalesce(l.event_sequence, 0) + 1 as event_sequence
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -176,6 +210,26 @@ changed as (
        or l.is_trusted      is distinct from c.is_trusted
        or l.is_quarantined  is distinct from c.is_quarantined
        or l.source_event_id is distinct from c.source_event_id
+
+),
+
+-- The WHERE below is what actually enforces "no duplicate decision under
+-- concurrent writers" (see the CONCURRENCY CONTRACT comment above):
+-- next_event_sequence_if_new() returns NULL exactly when some other writer
+-- already logged this record_token's identical decision_fingerprint first
+-- - dropping that row here, before it ever reaches this model's own
+-- INSERT, is what stops both writers from appending a row for the same
+-- decision.
+changed as (
+
+    select *
+    from (
+        select
+            *,
+            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+        from changed_candidates
+    )
+    where event_sequence is not null
 
 )
 
@@ -186,11 +240,15 @@ changed as (
 -- ledger's start-of-history point, not a reconstruction of decisions made
 -- before this model was added (those were never durably logged anywhere
 -- and can't be recovered; see the limitation above). No prior decision
--- exists for any of these rows, so previous_* is null for all of them, and
--- every row is event_sequence 1 for its record_token (record_lineage has
--- at most one row per record_token, so there's no ordering to get wrong
--- here even before event_sequence exists to enforce it elsewhere).
-changed as (
+-- exists for any of these rows, so previous_* is null for all of them.
+-- event_sequence still goes through the same next_event_sequence_if_new()
+-- allocator the incremental branch uses below (see the CONCURRENCY
+-- CONTRACT comment above), not a hardcoded 1: the allocator's per-
+-- record_token counter starts at zero and has no fingerprint on file yet,
+-- so a record_token's first-ever call here already returns 1 — but calling
+-- it is what teaches the allocator table that decision has been logged, so
+-- the *next* incremental run doesn't treat it as new and duplicate it.
+changed_candidates as (
 
     select
         c.*,
@@ -198,8 +256,21 @@ changed as (
         cast(null as boolean) as previous_is_trusted,
         cast(null as boolean) as previous_is_quarantined,
         cast(null as varchar) as previous_decision_fingerprint,
-        1 as event_sequence
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
     from current_state c
+
+),
+
+changed as (
+
+    select *
+    from (
+        select
+            *,
+            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+        from changed_candidates
+    )
+    where event_sequence is not null
 
 )
 
@@ -210,14 +281,12 @@ select
     record_token,
     record_token || ':' || cast(event_sequence as varchar) as ledger_key,
     event_sequence,
-    sha256(
-        record_token || ':' ||
-        coalesce(source_event_id, '') || ':' ||
-        quality_status || ':' ||
-        coalesce(failed_checks, '') || ':' ||
-        cast(is_trusted as varchar) || ':' ||
-        cast(is_quarantined as varchar)
-    ) as decision_fingerprint,
+    -- Computed once, up in changed_candidates (see
+    -- macros/lineage.sql's record_lineage_event_decision_fingerprint()) -
+    -- not recomputed here - specifically so this column can never drift
+    -- from the exact fingerprint value next_event_sequence_if_new() was
+    -- called with to decide whether this row is a genuinely new decision.
+    decision_fingerprint,
     previous_decision_fingerprint,
     -- Human-readable "what changed", read straight off the row instead of
     -- reconstructed by joining this table to itself: "(new)" for a

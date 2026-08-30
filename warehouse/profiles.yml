@@ -68,6 +68,13 @@ warehouse:
         - duckdb_plugins
       plugins:
         - module: lineage_udfs
+        # Registers next_event_sequence_if_new(record_token, decision_fingerprint)
+        # as a callable SQL function (see duckdb_plugins/lineage_seq_udf.py) —
+        # the real atomic check-and-allocate fix for gold.record_lineage_event's
+        # event_sequence/duplicate-decision concurrency race (see that
+        # model's own CONCURRENCY CONTRACT comment and
+        # reliability-tests/14_ducklake_concurrent_writers.md).
+        - module: lineage_seq_udf
       schema: gold
       # threads: 1, NOT dbt's usual default of 4 or more: a real
       # e2e-pipeline.yml run (33268516850) segfaulted (exit 139, no dbt-level
@@ -94,14 +101,31 @@ warehouse:
       # a freshly-created catalog's first write) - are both now CLOSED
       # (fixed via PR #236 and its own fix respectively). Neither report
       # describes a crash/segfault specifically, though, so this project
-      # never pinned its own segfault to either issue's exact mechanism -
-      # only confirmed that serializing writes (this threads: 1) eliminates
-      # it. With both cited issues now fixed upstream, this is worth
-      # re-testing directly (does concurrent writing to this catalog crash
-      # today, on a current duckdb/ducklake build?) before ever removing
-      # this setting - not assuming it's resolved just because the tracked
-      # issues are closed. Until that's actually re-verified, serializing
-      # to one thread avoids any concurrent DuckLake write in this pipeline
-      # entirely; the dataset here is synthetic test fixtures, so the lost
-      # parallelism costs nothing that matters.
+      # never pinned its own segfault to either issue's exact mechanism.
+      #
+      # RE-TESTED (2026-08-30, real e2e-pipeline.yml runs, not just reasoning
+      # about closed upstream issues): flipped threads back to 4 and ran the
+      # real pipeline three times. Runs 33300464909 and 33300714850 passed
+      # clean. Run 33301008146 crashed - identical signature to the original
+      # report: "Concurrency: 4 threads (target='dev')" immediately followed
+      # by "Segmentation fault (core dumped)", exit 139, on
+      # `dbt run --select br_patients sl_patients br_encounters sl_encounters`
+      # - two different models being written concurrently, same as the
+      # original crash. So the honest, current, re-verified answer is: this
+      # is NOT fixed, it's INTERMITTENT - roughly 1 crash in 3 real attempts
+      # in this environment, not something that reliably reproduces every
+      # time but also not something that reliably doesn't. threads: 1 stays
+      # required until that intermittent native crash is actually resolved
+      # upstream (or a newer duckdb/ducklake build is confirmed clean across
+      # many more real runs than three) - the dataset here is synthetic test
+      # fixtures, so the lost parallelism costs nothing that matters.
+      #
+      # Note this is a DIFFERENT concurrency question than
+      # gold.record_lineage_event's own event_sequence race (see that
+      # model's CONCURRENCY CONTRACT comment and reliability-tests/14_*):
+      # this setting controls INTRA-invocation thread parallelism (multiple
+      # models built concurrently within one `dbt run` process, which is
+      # what crashed here); event_sequence's race needs two separate `dbt
+      # run` PROCESSES both writing the same model concurrently, which
+      # threads: alone has no bearing on at any value.
       threads: 1

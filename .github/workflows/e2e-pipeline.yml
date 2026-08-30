@@ -727,6 +727,78 @@ jobs:
           [ "${trusted_n:-0}" = "1" ] || fail "scenario 11: expected diagnosis 9003 (a valid reference) in trusted_diagnoses, got count=$trusted_n"
           echo "Scenario 11 passed: Debezium resumed from its committed offset after being killed and restarted - the event written while it was down landed exactly once, with no gap and no duplication."
 
+      - name: Set up scenario 14 (new pending decisions for concurrent writers to race on)
+        # reliability-tests/14_ducklake_concurrent_writers.md, automated.
+        # 5 fresh diagnoses (IDs unused by any other scenario), each
+        # referencing a nonexistent patient - same referential-integrity
+        # shape as scenario 5 - so each gets a genuine new FAIL/quarantined
+        # decision that has never been logged in record_lineage_event.
+        run: |
+          PGPASSWORD=testpass psql -h localhost -p 5433 -U testuser -d warehouse -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO raw_cdc.diagnoses
+              (diagnosis_id, encounter_id, patient_id, icd10_code, description, diagnosed_at, __op, __table, __source_ts_ns, __source_lsn, __db)
+          VALUES
+              (9010, 1, 999998, 'Z00.10', 'scenario 14 writer A/B race fixture', TIMESTAMP '2026-03-01 09:10:00', 'c', 'diagnoses', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:10:00') * 1e9 AS BIGINT), 900000010, 'ehr'),
+              (9011, 1, 999998, 'Z00.11', 'scenario 14 writer A/B race fixture', TIMESTAMP '2026-03-01 09:10:01', 'c', 'diagnoses', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:10:01') * 1e9 AS BIGINT), 900000011, 'ehr'),
+              (9012, 1, 999998, 'Z00.12', 'scenario 14 writer A/B race fixture', TIMESTAMP '2026-03-01 09:10:02', 'c', 'diagnoses', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:10:02') * 1e9 AS BIGINT), 900000012, 'ehr'),
+              (9013, 1, 999998, 'Z00.13', 'scenario 14 writer A/B race fixture', TIMESTAMP '2026-03-01 09:10:03', 'c', 'diagnoses', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:10:03') * 1e9 AS BIGINT), 900000013, 'ehr'),
+              (9014, 1, 999998, 'Z00.14', 'scenario 14 writer A/B race fixture', TIMESTAMP '2026-03-01 09:10:04', 'c', 'diagnoses', CAST(extract(epoch from TIMESTAMP '2026-03-01 09:10:04') * 1e9 AS BIGINT), 900000014, 'ehr');
+          SQL
+          cd warehouse
+          ../.venv/bin/dbt run --select br_diagnoses sl_diagnoses trusted_diagnoses quarantine_diagnoses record_lineage --profiles-dir .
+
+      - name: Race two concurrent record_lineage_event writers (scenario 14)
+        # Real, independent OS processes - not dbt threads within one
+        # invocation (threads: has no bearing on this race at any value;
+        # see profiles.yml's and record_lineage_event.sql's own comments).
+        # Both race to log the same 5 pending decisions from the step
+        # above. Capture each process's actual exit code via `wait $pid` -
+        # a crash here (matching the intermittent native crash this
+        # project's own threads:4 re-test already confirmed under
+        # concurrent writes to *different* models) is itself a real,
+        # reportable finding, not just a test-harness failure.
+        working-directory: warehouse
+        run: |
+          ../.venv/bin/dbt run --select record_lineage_event --profiles-dir . > /tmp/scenario14_writer_a.log 2>&1 &
+          pid_a=$!
+          ../.venv/bin/dbt run --select record_lineage_event --profiles-dir . > /tmp/scenario14_writer_b.log 2>&1 &
+          pid_b=$!
+          wait "$pid_a"; exit_a=$?
+          wait "$pid_b"; exit_b=$?
+          echo "Writer A exit code: $exit_a"
+          echo "Writer B exit code: $exit_b"
+          echo "$exit_a" > /tmp/scenario14_exit_a.txt
+          echo "$exit_b" > /tmp/scenario14_exit_b.txt
+          echo "--- Writer A log ---"; cat /tmp/scenario14_writer_a.log
+          echo "--- Writer B log ---"; cat /tmp/scenario14_writer_b.log
+
+      - name: Assert scenario 14's outcome - no duplicate event_sequence/ledger_key under concurrent writers
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          exit_a=$(cat /tmp/scenario14_exit_a.txt)
+          exit_b=$(cat /tmp/scenario14_exit_b.txt)
+          if [ "$exit_a" != "0" ] || [ "$exit_b" != "0" ]; then
+            echo "::warning::scenario 14: at least one concurrent writer exited non-zero (A=$exit_a, B=$exit_b) - see the previous step's logs. This is a real finding (possibly the same intermittent native crash confirmed under threads>1 in this environment, now under two separate processes), not necessarily a bug in this assertion step - continuing to check the resulting table state regardless."
+          fi
+
+          dup_seq=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM (SELECT record_token, event_sequence FROM gold.record_lineage_event GROUP BY record_token, event_sequence HAVING count(*) > 1)" \
+            2>/dev/null | tail -n1)
+          [ "${dup_seq:-0}" = "0" ] || fail "scenario 14: found $dup_seq (record_token, event_sequence) pair(s) logged more than once under concurrent writers - next_event_sequence_if_new()'s atomic allocator (warehouse/duckdb_plugins/lineage_seq_udf.py) failed to serialize this race (see record_lineage_event.sql's CONCURRENCY CONTRACT comment)."
+
+          dup_key=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM (SELECT ledger_key FROM gold.record_lineage_event GROUP BY ledger_key HAVING count(*) > 1)" \
+            2>/dev/null | tail -n1)
+          [ "${dup_key:-0}" = "0" ] || fail "scenario 14: found $dup_key duplicate ledger_key value(s) under concurrent writers."
+
+          logged_n=$(.venv/bin/python3 infra-setup/scripts/dq.py \
+            "SELECT count(*) FROM gold.record_lineage_event q JOIN bronze.br_diagnoses b ON b.record_token = q.record_token WHERE b.diagnosis_id IN (9010, 9011, 9012, 9013, 9014) AND q.quality_status = 'FAIL'" \
+            2>/dev/null | tail -n1)
+          [ "${logged_n:-0}" = "5" ] || fail "scenario 14: expected exactly 5 logged FAIL decisions (one per new diagnosis, from whichever writer's insert actually landed), got $logged_n - either some were lost (both writers somehow missed one) or duplicated."
+
+          echo "Scenario 14 passed: two concurrent, independent record_lineage_event writers raced on 5 newly-pending decisions with no duplicate event_sequence, no duplicate ledger_key, and no lost decisions."
+
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
         # multi-service pipeline. Every service's log, plus dbt's own log,
