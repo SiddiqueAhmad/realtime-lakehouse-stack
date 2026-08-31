@@ -187,6 +187,24 @@ jobs:
           ../.venv/bin/dbt run  --profiles-dir .
           ../.venv/bin/dbt test --profiles-dir .
 
+      - name: Run lineage ledger reconciliation (issue #11)
+        # infra-setup/scripts/lineage_ledger_reconciliation.py, run right
+        # after the pipeline step that builds record_lineage_event
+        # completes - not on an independent schedule that could overlap a
+        # live dbt run (see that script's own docstring: this is the
+        # operational pattern its allocator/ledger race guidance assumes).
+        # This is the mechanism's first real proof against the ACTUAL
+        # DuckLake-attached ledger and the ACTUAL dbt-Jinja-generated JSON
+        # payload (macros/lineage.sql's record_lineage_event_payload_json())
+        # - scenario 16 exercises the mechanism directly with synthetic
+        # payloads, never through a real dbt run. Every decision this
+        # normal, uninterrupted `dbt run` just logged should already be
+        # present in the ledger (no crash occurred), so this is expected to
+        # find nothing to repair - a steady-state smoke test that
+        # reconciliation is safe to run after an ordinary pipeline
+        # invocation, not just against deliberately orphaned rows.
+        run: .venv/bin/python3 infra-setup/scripts/lineage_ledger_reconciliation.py
+
       - name: Run scenario 01 (duplicate event) directly against raw_cdc
         # Postgres-native — inserts straight into the raw CDC table, so
         # there's no Debezium delivery to wait on before the first dbt run

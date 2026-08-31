@@ -41,6 +41,17 @@ Checks:
      {1, 3} or {2} - proving the outbox's per-event_sequence design (not a
      single latest-allocation row) survives more than one orphan per
      record_token over time.
+  4. Two reconcile() calls racing on the SAME orphan must not both repair
+     it. Simulated deterministically (not via a real timing-dependent
+     race): a second connection manually claims the row with the exact
+     SELECT ... FOR UPDATE SKIP LOCKED reconcile() itself uses and holds
+     that transaction open, uncommitted; a concurrent reconcile() call from
+     a THIRD connection must see nothing claimable and must NOT repair it;
+     releasing the claim and calling reconcile() again must then repair it
+     normally. Proves lineage_ledger_reconciliation.py's own claim
+     mechanism (see its "CONCURRENT RECONCILIATION WORKERS" docstring
+     section) actually excludes a concurrent worker rather than letting two
+     callers both replay the same INSERT.
 
 Usage: lineage_ledger_reconciliation_test.py
 Exit 0 on success, exit 1 if any check finds incorrect behavior.
@@ -50,6 +61,8 @@ import json
 import os
 import sys
 import uuid
+
+import psycopg2
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "warehouse", "duckdb_plugins"))
@@ -65,7 +78,17 @@ def _ensure_ddl():
     with conn.cursor() as cur:
         try:
             cur.execute(alloc._DDL)
-        except Exception:
+        except (
+            psycopg2.errors.DuplicateObject,
+            psycopg2.errors.DuplicateSchema,
+            psycopg2.errors.DuplicateTable,
+            psycopg2.errors.UniqueViolation,
+        ):
+            # The same specific, already-safe-to-ignore race
+            # lineage_seq_udf.py's own initialize() and
+            # lineage_ledger_reconciliation.py's own main() catch this exact
+            # way - not a bare `except Exception: pass` that would also
+            # hide a genuine DDL failure.
             pass
     conn.close()
 
@@ -231,20 +254,87 @@ def check_second_orphan_keeps_sequence_dense(record_token, pg_conn, duck_con):
     )
 
 
+def check_concurrent_reconciliation_is_claim_safe(pg_conn, duck_con):
+    record_token = f"scenario16-concurrent-{uuid.uuid4()}"
+    fingerprint = "fp-scenario16-concurrent"
+    payload = _fake_payload()
+    seq = _allocate_orphan(record_token, fingerprint, payload)
+    if seq != 1:
+        raise AssertionError(f"check 4 setup: expected allocation to get event_sequence=1, got {seq}")
+
+    # Manually run the exact claiming query reconcile() itself uses, on a
+    # SEPARATE connection, and hold that transaction open (uncommitted) -
+    # simulating "another reconcile() call got here first and hasn't
+    # finished yet" deterministically, without a real timing-dependent race.
+    claim_conn = alloc._connect()
+    claim_conn.autocommit = False
+    try:
+        with claim_conn.cursor() as cur:
+            cur.execute(reconciler._SELECT_PENDING_FOR_UPDATE)
+            claimed_tokens = {row[0] for row in cur.fetchall()}
+        if record_token not in claimed_tokens:
+            raise AssertionError(
+                f"check 4 setup: expected the claiming connection to lock {record_token}'s pending row, "
+                f"got claims for {claimed_tokens}"
+            )
+
+        # A THIRD, independent connection's reconcile() call, while the row
+        # above is still locked and uncommitted on claim_conn - must see
+        # nothing claimable for this token and must not repair it.
+        concurrent_pg_conn = alloc._connect()
+        concurrent_pg_conn.autocommit = True
+        try:
+            reconciler.reconcile(concurrent_pg_conn, duck_con)
+        finally:
+            concurrent_pg_conn.close()
+
+        still_missing = _ledger_row(duck_con, record_token, 1)
+        if still_missing is not None:
+            raise AssertionError(
+                f"check 4: a concurrent reconcile() call repaired {record_token}:1 while another "
+                f"connection still held its FOR UPDATE SKIP LOCKED claim on it - the claim did not "
+                f"exclude it: {still_missing}"
+            )
+    finally:
+        # Release the claim without having written anything on this
+        # connection - a plain rollback.
+        claim_conn.rollback()
+        claim_conn.close()
+
+    # Nothing holds the claim anymore - a normal reconcile() call must
+    # repair it exactly as check 1 proved for an uncontended orphan.
+    summary = reconciler.reconcile(pg_conn, duck_con)
+    if summary["repaired"] < 1 or summary["failed"]:
+        raise AssertionError(f"check 4: expected the orphan to be repaired once its claim was released, got summary={summary}")
+    after = _ledger_row(duck_con, record_token, 1)
+    if after is None:
+        raise AssertionError("check 4: expected a ledger row to exist after the claim was released and reconciliation re-ran")
+
+    print(
+        "check 4 PASSED: while one connection held a FOR UPDATE SKIP LOCKED claim on an orphan's outbox "
+        "row, a concurrent reconcile() call correctly saw nothing claimable and did not repair it; once "
+        "the claim was released, a normal reconcile() call repaired it exactly as an uncontended orphan "
+        "would be - the claim excludes a concurrent worker without permanently blocking the repair."
+    )
+
+
 def main() -> int:
     _ensure_ddl()
     try:
         record_token, pg_conn, duck_con = check_orphan_detected_and_repaired()
         check_repair_is_idempotent(record_token, pg_conn, duck_con)
         check_second_orphan_keeps_sequence_dense(record_token, pg_conn, duck_con)
+        check_concurrent_reconciliation_is_claim_safe(pg_conn, duck_con)
     except AssertionError as e:
         print(f"::error::scenario 16: {e}", file=sys.stderr)
         return 1
     print(
         "Scenario 16 passed: the allocator/ledger atomicity gap (issue #11) is closed by reconciliation - "
         "an allocation with no corresponding ledger row is detected and repaired from its durably staged "
-        "payload, at its original event_sequence, idempotently, and repeated orphans for the same "
-        "record_token are each independently recovered without breaking sequence density."
+        "payload, at its original event_sequence, idempotently, repeated orphans for the same "
+        "record_token are each independently recovered without breaking sequence density, and a "
+        "concurrent reconciliation worker is excluded from a row another one already claimed rather than "
+        "racing it to a duplicate INSERT."
     )
     return 0
 

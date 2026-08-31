@@ -61,6 +61,20 @@ like two full runs, which is what checks 1–2 below actually prove (a live
 process kill mid-reconciliation isn't separately simulated — see "What this
 scenario does and does not prove").
 
+That sequential idempotency claim is NOT by itself enough for two
+reconciliation passes running at the same time, though — both could check
+the same outbox row, both find the ledger row absent, and both attempt the
+`INSERT`. `reconcile()` closes that specific gap with a real Postgres row
+lock: it claims every pending outbox row with `SELECT ... FOR UPDATE SKIP
+LOCKED` inside one transaction spanning the whole pass, so a second,
+concurrent call simply gets back none of the rows the first call already
+claimed — not blocked, not retried, just nothing left for it to do this
+pass. Check 4 below proves this directly. (This does not protect against a
+race with the *original* `dbt run`'s own in-flight `INSERT` for the same
+decision — a different database this script holds no lock over; see
+`lineage_ledger_reconciliation.py`'s own docstring for why that's an
+operational/scheduling concern, not a locking one.)
+
 ## Setup
 
 None beyond Postgres and DuckDB/DuckLake being up. Like scenario 15, this
@@ -103,14 +117,26 @@ this scenario can run anywhere in the workflow relative to those.
    per-`event_sequence` design (not a single latest-allocation row per
    `record_token`) correctly survives more than one orphan over time for
    the same record.
+4. **Concurrent reconciliation workers don't race each other to a
+   duplicate `INSERT`.** Simulated deterministically, not via a real
+   timing-dependent race: a second connection manually runs the exact
+   `SELECT ... FOR UPDATE SKIP LOCKED` claim `reconcile()` itself uses and
+   holds that transaction open, uncommitted; a `reconcile()` call from a
+   THIRD, independent connection, while that claim is held, must see
+   nothing claimable for this row and must NOT repair it. Releasing the
+   claim and calling `reconcile()` again must then repair it normally —
+   proving the claim excludes a concurrent worker without permanently
+   blocking the real repair.
 
 ## What this scenario does and does not prove
 
 - **Proves:** an allocation with no corresponding ledger row is detected
   and repaired, exactly reconstructed from its durably staged payload, at
-  its original sequence position, idempotently, and that this holds for
-  more than one orphan on the same `record_token` without breaking
-  sequence density.
+  its original sequence position, idempotently, that this holds for more
+  than one orphan on the same `record_token` without breaking sequence
+  density, and that a concurrent reconciliation worker is excluded from a
+  row another one has already claimed rather than racing it to a duplicate
+  `INSERT`.
 - **Does not separately prove:** literal process-kill crash-safety of the
   reconciliation script itself (e.g. `SIGKILL` mid-`INSERT`). The design
   argument for that (see "How the fix works" above) is that every step is
@@ -119,12 +145,20 @@ this scenario can run anywhere in the workflow relative to those.
   proof already covers exactly that composition. A literal kill-and-resume
   harness would be testing the OS process model, not this mechanism's own
   logic, and was judged not to add signal beyond check 2.
-- **Does not prove:** this scenario doesn't exercise reconciliation being
-  run automatically on a schedule or at pipeline startup — it's invoked
-  directly here, the same way a production deployment would need to wire
-  it in (a periodic job, or a startup check) as an operational decision
-  outside this repo's CI, which only proves the mechanism itself is
-  correct.
+- **Does not prove:** safety against a race with the *original* `dbt run`'s
+  own in-flight `INSERT` for the same decision (as opposed to a race
+  between two reconciliation workers, which check 4 does cover) — a
+  different database this script holds no Postgres lock over. The
+  documented operational answer is scheduling discipline (never run
+  reconciliation concurrently with an in-flight `dbt run` building
+  `record_lineage_event`), not another lock; see
+  `lineage_ledger_reconciliation.py`'s own docstring. Also not exercised
+  here: reconciliation running automatically on a schedule or at pipeline
+  startup in a real deployment — see
+  `.github/workflows/e2e-pipeline.yml`'s own reconciliation step
+  (immediately after the normal pipeline build) for the intended wiring
+  pattern in this reference stack; a dedicated production
+  scheduler/orchestrator is out of scope here.
 
 **Automated as:** the "scenario 16" step in `.github/workflows/e2e-pipeline.yml`
 (`infra-setup/scripts/lineage_ledger_reconciliation_test.py`), immediately
