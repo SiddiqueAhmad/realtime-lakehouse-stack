@@ -233,15 +233,18 @@ JVM query server, no separate object-store service, no REST catalog service
    documented Postgres gotcha this testing surfaced directly: `CREATE ...
    IF NOT EXISTS` is not itself race-free under concurrent execution (two
    sessions can both pass the existence check before either commits), now
-   handled explicitly. The one documented residual limitation: an
+   handled explicitly. The one residual limitation this surfaced: an
    allocation that commits (autocommit, by design) but is then never used
    because the surrounding `dbt run`'s own insert aborts afterward would
    leave a gap — not expected under this pipeline's normal operation (every
    workflow run starts from a freshly created Postgres database) and would
-   only matter alongside a future `dbt run --full-refresh` of this model,
-   which nothing here does today. See that module's own docstring for the
-   full case. **This gap is now an executable, CI-checked characterization,
-   not just a docstring claim** — `reliability-tests/15_lineage_allocator_atomicity.md`
+   only matter alongside a future `dbt run --full-refresh` of this model, or
+   a real production deployment persisting Postgres across restarts. **This
+   gap is now CLOSED (issue #11)**, not just characterized — see the
+   allocator/ledger reconciliation entry below for how. See that module's
+   own docstring for the full case. This gap's *retry-suppression*
+   behavior specifically is an executable, CI-checked characterization, not
+   just a docstring claim — `reliability-tests/15_lineage_allocator_atomicity.md`
    (scenario 15, automated as the step right after scenario 14 in
    `e2e-pipeline.yml`) reproduces exactly this sequence directly against
    the allocator and asserts the retry comes back suppressed, so any
@@ -255,8 +258,20 @@ JVM query server, no separate object-store service, no REST catalog service
    `dbt` -> DuckDB/DuckLake -> ledger pipeline; scenario 15 proves
    concurrency correctness of the Postgres-backed allocator itself,
    exercised directly; **neither** proves atomic durability of "allocate,
-   then DuckDB `INSERT`" as one transaction - that gap stays open, only
-   now CI-characterized rather than merely documented.
+   then DuckDB `INSERT`" as one transaction - that specific gap is still
+   real (DuckDB/DuckLake and Postgres remain two independent transactional
+   systems, no 2PC coordinator between them). **What closes issue #11 is
+   not atomicity, though — it's recoverability:** the same atomic Postgres
+   statement that allocates `event_sequence` now also durably stages the
+   full row into `lineage_seq.record_lineage_event_outbox`, and
+   `infra-setup/scripts/lineage_ledger_reconciliation.py` detects and
+   repairs any staged row with no matching ledger row, at its original
+   `event_sequence`, preserving `record_lineage_event`'s dense-sequence
+   invariant. **Scenario 16** (`reliability-tests/16_lineage_ledger_reconciliation.md`)
+   is the executable proof of that repair. A committed allocation can no
+   longer become a silently, permanently lost lineage event - the concrete
+   failure issue #11 raised - even though the allocation and the ledger
+   `INSERT` still aren't one atomic transaction.
 
 **`warehouse.raw_cdc` durability contract** (stated explicitly, not implied):
 it is Debezium's append-only landing log, and the *only* copy of the raw CDC

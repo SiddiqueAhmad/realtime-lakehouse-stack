@@ -77,35 +77,43 @@ scenario 14 in the same workflow without disturbing either one.
    allocator's locking is scoped per-`record_token` (Postgres's real
    per-row lock), not accidentally serializing unrelated tokens through
    one shared lock.
-4. **The allocation-without-ledger-insert gap.** `lineage_seq_udf.py`'s
-   own docstring documents a known limitation: the allocator's Postgres
-   commit and the DuckDB ledger `INSERT` are two separate transactions,
-   not one atomic unit, so a `dbt run` that dies (or whose own `INSERT`
-   fails) *after* the allocator has already committed leaves that decision
-   allocated-but-never-logged — and permanently un-retriable, since a
-   later retry with the identical `(record_token, decision_fingerprint)`
-   finds the same fingerprint already on file and gets `NULL` back, exactly
-   as if it had already been safely logged. This check reproduces that
-   exact sequence directly (allocate once, simulate the missing ledger
-   insert by simply not performing one, then allocate again with the
-   identical pair) and asserts the second call returns `NULL`.
+4. **The allocation-without-ledger-insert gap.** The allocator's Postgres
+   commit and the DuckDB ledger `INSERT` are two separate transactions, not
+   one atomic unit, so a `dbt run` that dies (or whose own `INSERT` fails)
+   *after* the allocator has already committed leaves that decision
+   allocated-but-never-logged, and a later retry with the identical
+   `(record_token, decision_fingerprint)` finds the same fingerprint
+   already on file and gets `NULL` back, exactly as if it had already been
+   safely logged. This check reproduces that exact sequence directly
+   (allocate once, simulate the missing ledger insert by simply not
+   performing one, then allocate again with the identical pair) and
+   asserts the second call returns `NULL`.
 
-   **This check is a characterization, not a bug report.** It exists to
-   keep `lineage_seq_udf.py`'s documented claim honest and CI-checked —
-   it *passes* when the gap reproduces exactly as documented, and would
-   *fail* (catching drift either direction) if the allocator's behavior
-   ever silently changed without the docstring being updated to match.
-   The gap itself remains a known, accepted architectural limitation, not
-   something this scenario claims to fix — see `lineage_seq_udf.py`'s own
-   "KNOWN LIMITATION" section and README.md's known-gaps entry for why
-   it's currently accepted (every workflow run starts from a freshly
-   created Postgres database, so this pipeline never actually exercises a
-   full-refresh-after-partial-failure scenario that would surface it in
-   practice today) and what would need to change to close it (the
-   allocation and the ledger insert would need to become one atomic unit
-   across DuckDB and Postgres, or a reconciliation pass would need to
-   detect and repair an allocated-but-never-logged decision — neither
-   implemented here).
+   **This check is a characterization of the allocator's own
+   retry-suppression behavior, not of an open bug** — issue #11's fix
+   (see below) closed the actual failure mode (a lost lineage event no
+   retry could recover) without touching this suppression logic at all,
+   since it's the same "is this decision actually new" check that stops
+   duplicate decisions under concurrency in checks 1–3 above. It exists to
+   keep that specific behavior honest and CI-checked — it *passes* when
+   the suppression reproduces exactly as documented, and would *fail*
+   (catching drift either direction) if it ever silently changed.
+
+   **Issue #11 (closed): what makes that `NULL` recoverable now.** The
+   same atomic Postgres statement that allocates the sequence number also
+   durably stages the full row that decision's ledger `INSERT` would have
+   written, into `lineage_seq.record_lineage_event_outbox` (see
+   `lineage_seq_udf.py`'s own docstring and
+   `macros/lineage.sql`'s `record_lineage_event_payload_json()`). A
+   reconciliation pass, `infra-setup/scripts/lineage_ledger_reconciliation.py`,
+   detects any outbox row with no matching ledger row and replays the
+   `INSERT` from that staged payload, at the ORIGINAL `event_sequence` —
+   preserving the dense-sequence invariant
+   `tests/assert_record_lineage_event_sequence_is_dense_and_unique.sql`
+   enforces. See scenario 16
+   (`16_lineage_ledger_reconciliation.md`) for the executable proof of that
+   repair. This check's `NULL` result is unchanged — what changed is that
+   it's no longer permanent.
 
 ## What this scenario does and does not prove
 
@@ -128,12 +136,12 @@ plus one still-open question, so state each one exactly:
   safe under concurrency — only that the allocator those pipeline writers
   depend on is.
 - **Neither proves:** atomic durability of "allocate, then DuckLake
-  `INSERT`" as one transaction. That's exactly check 4 above — a
-  characterization of a known, open gap, not a demonstration that it's
-  closed. Closing it is a separate, legitimate architectural question
-  (two-phase commit across DuckDB and Postgres, vs. a reconciliation pass
-  that detects and repairs an allocated-but-never-logged decision) for a
-  future change, not something either scenario claims to answer.
+  `INSERT`" as one transaction — that's still not one atomic unit, and
+  check 4 above still characterizes exactly that. What *is* now proven,
+  by scenario 16 (`16_lineage_ledger_reconciliation.md`), is the property
+  that actually mattered per issue #11: a decision allocated here is never
+  permanently lost even when its own `INSERT` doesn't land, because the
+  same allocation call durably staged it for reconciliation to replay.
 
 Read scenarios 14 and 15 together, not as substitutes for each other —
 and read both alongside that third bullet before calling the lineage
@@ -151,6 +159,6 @@ same-`record_token`-different-decision race exercised through the *real*
 pipeline (two genuine `dbt run` processes, not direct allocator calls) —
 would need deliberately racing a source-data mutation against the two
 writers' upstream reads, which is inherently timing-dependent and would
-make this a flaky CI check rather than a deterministic one; and a fix (as
-opposed to a characterization) for check 4's atomicity gap. Both remain
-legitimate follow-up work.
+make this a flaky CI check rather than a deterministic one. Remains
+legitimate follow-up work. (Check 4's atomicity gap is no longer
+open-ended follow-up — see scenario 16.)

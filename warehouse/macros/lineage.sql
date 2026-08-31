@@ -87,6 +87,67 @@
     {{ pipeline_run_id() }}                                    as pipeline_run_id
 {% endmacro %}
 
+{% macro record_lineage_event_decision_transition(previous_quality_status_expr, previous_is_trusted_expr, quality_status_expr, is_trusted_expr) %}
+    -- Factored out of models/gold/record_lineage_event.sql's final SELECT
+    -- for the same reason record_lineage_event_decision_fingerprint() below
+    -- was: this value is now also needed BEFORE the allocator call (folded
+    -- into the JSON payload record_lineage_event_payload_json() stages for
+    -- reconciliation - see lineage_seq_udf.py), not just in the model's own
+    -- output column, so it has to be computed once and reused, not
+    -- recomputed twice from possibly-drifted copies of the same CASE logic.
+    coalesce(
+        case
+            when {{ previous_quality_status_expr }} = 'DELETED' then 'DELETED'
+            when {{ previous_quality_status_expr }} is not null then
+                {{ previous_quality_status_expr }} || '/' ||
+                    (case when {{ previous_is_trusted_expr }} then 'trusted' else 'quarantined' end)
+        end,
+        '(new)'
+    ) || ' -> ' ||
+        case
+            when {{ quality_status_expr }} = 'DELETED' then 'DELETED'
+            else {{ quality_status_expr }} || '/' || (case when {{ is_trusted_expr }} then 'trusted' else 'quarantined' end)
+        end
+{% endmacro %}
+
+{% macro record_lineage_event_payload_json(dataset_expr, source_event_id_expr, pipeline_run_id_expr, cdc_operation_expr, quality_status_expr, failed_checks_expr, is_trusted_expr, is_quarantined_expr, previous_decision_fingerprint_expr, decision_transition_expr, logged_at_expr) %}
+    -- The durable "what record_lineage_event.sql's own INSERT is about to
+    -- write for this decision" snapshot - everything that model's final
+    -- SELECT produces for one row, EXCEPT record_token, event_sequence,
+    -- decision_fingerprint and ledger_key, which the allocator/outbox
+    -- already carries as first-class columns of its own (see
+    -- lineage_seq_udf.py's _ALLOCATE_IF_NEW and its outbox table's
+    -- columns) and so would be redundant to duplicate inside the JSON.
+    -- Passed to next_event_sequence_if_new() as this decision's payload,
+    -- staged into lineage_seq.record_lineage_event_outbox atomically
+    -- alongside the allocation itself - see that module's docstring for
+    -- why: if the surrounding dbt run's own INSERT into this table never
+    -- lands (crash, failure), infra-setup/scripts/lineage_ledger_reconciliation.py
+    -- reconstructs the exact row that was supposed to be logged straight
+    -- from this JSON, rather than having to (incorrectly) recompute it from
+    -- record_lineage's CURRENT state, which may have moved on by the time
+    -- reconciliation runs.
+    to_json(struct_pack(
+        dataset := {{ dataset_expr }},
+        source_event_id := {{ source_event_id_expr }},
+        pipeline_run_id := {{ pipeline_run_id_expr }},
+        cdc_operation := {{ cdc_operation_expr }},
+        quality_status := {{ quality_status_expr }},
+        failed_checks := {{ failed_checks_expr }},
+        is_trusted := {{ is_trusted_expr }},
+        is_quarantined := {{ is_quarantined_expr }},
+        previous_decision_fingerprint := {{ previous_decision_fingerprint_expr }},
+        decision_transition := {{ decision_transition_expr }},
+        -- strftime to a fixed, explicit format rather than letting to_json()
+        -- pick its own TIMESTAMP -> string rendering: infra-setup/scripts/
+        -- lineage_ledger_reconciliation.py has to parse this same string
+        -- back out on the Python side to replay it as a TIMESTAMP literal,
+        -- and pinning the format here is what keeps those two sides from
+        -- ever silently drifting apart.
+        logged_at := strftime({{ logged_at_expr }}, '%Y-%m-%d %H:%M:%S.%f')
+    ))
+{% endmacro %}
+
 {% macro record_lineage_event_decision_fingerprint(record_token_expr, source_event_id_expr, quality_status_expr, failed_checks_expr, is_trusted_expr, is_quarantined_expr) %}
     -- Deterministic hash of exactly the fields models/gold/record_lineage_event.sql's
     -- own change-detection compares on. Factored out into one macro (rather

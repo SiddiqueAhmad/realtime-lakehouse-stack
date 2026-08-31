@@ -1,6 +1,6 @@
 # Reliability test suite
 
-Fifteen scenarios that exercise the CDC reliability engine
+Sixteen scenarios that exercise the CDC reliability engine
 (`warehouse/macros/cdc_reliability.sql`), the data quality gates
 (`warehouse/macros/data_quality.sql`), and lineage (`warehouse/macros/lineage.sql`)
 against the questions the platform needs to be able to answer:
@@ -38,7 +38,8 @@ pipeline can pass one while failing another:
 | 12 | Reprocessing after outage | `12_reprocessing_after_outage.md` | offset resumption + ordering — manual only; see its own file, largely the same claim as 01/03 (which are automated) taken across a full outage/recovery cycle rather than a single insert |
 | 13 | Corrected referential integrity | `13_quarantine_correction.sql` | historical lineage — quarantine → trusted transition, both retained |
 | 14 | DuckLake concurrent writers | `14_ducklake_concurrent_writers.md` | catalog-level write concurrency — two independent processes racing to log the same pending decisions, specifically `event_sequence`'s safety under real concurrency (not `threads:`, which is a different question — see the file's own explanation) |
-| 15 | Lineage allocator concurrency + atomicity gap | `15_lineage_allocator_atomicity.md` | the Postgres allocator behind scenario 14's fix, exercised directly at higher concurrency and across race shapes the dbt-run-based scenario 14 can't produce (same-`record_token`-different-decision, cross-token isolation, a writer-count stress sweep), plus an executable characterization of that allocator's one documented known limitation |
+| 15 | Lineage allocator concurrency + atomicity gap | `15_lineage_allocator_atomicity.md` | the Postgres allocator behind scenario 14's fix, exercised directly at higher concurrency and across race shapes the dbt-run-based scenario 14 can't produce (same-`record_token`-different-decision, cross-token isolation, a writer-count stress sweep), plus an executable characterization of the allocator's retry-suppression behavior on an allocation with no ledger insert |
+| 16 | Allocator/ledger reconciliation | `16_lineage_ledger_reconciliation.md` | closes issue #11: an allocation with no corresponding `gold.record_lineage_event` row (the exact gap scenario 15's check 4 characterizes) is detected and repaired from a durably staged outbox payload, idempotently, at its original `event_sequence` — see `infra-setup/scripts/lineage_ledger_reconciliation.py` |
 
 Connection defaults used below: Postgres on `localhost:5433` (db=`ehr` for
 the OLTP source, db=`warehouse` for the raw CDC landing schema and DuckLake

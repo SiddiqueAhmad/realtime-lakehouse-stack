@@ -125,8 +125,15 @@
 -- available before, not after, the allocation call) - the race's loser
 -- gets NULL back, and `changed`'s outer filter drops that row before it
 -- ever reaches the INSERT. See that module's own docstring for the full
--- mechanism and its one documented known limitation (a gap on an aborted
--- DuckDB transaction after a successful allocation).
+-- mechanism, including how ALLOCATOR/LEDGER ATOMICITY (issue #11) is
+-- handled: the same atomic Postgres statement that allocates event_sequence
+-- also durably stages the exact row this model is about to insert (see the
+-- `changed` CTE's own comment below and macros/lineage.sql's
+-- record_lineage_event_payload_json()), so a decision that gets allocated
+-- here but never actually inserted (this model's own INSERT fails or the
+-- process dies first) is recoverable by
+-- infra-setup/scripts/lineage_ledger_reconciliation.py rather than
+-- permanently lost.
 --
 -- IMPORTANT DISTINCTION, corrected after an earlier version of this note
 -- got it wrong: this race is NOT what warehouse/profiles.yml's threads: 1
@@ -202,7 +209,16 @@ changed_candidates as (
         l.is_trusted           as previous_is_trusted,
         l.is_quarantined       as previous_is_quarantined,
         l.decision_fingerprint as previous_decision_fingerprint,
-        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint,
+        -- Computed once, here, for the same reason decision_fingerprint is
+        -- (see that column's comment and macros/lineage.sql's own
+        -- docstring): decision_transition and logged_at both now also feed
+        -- the JSON payload staged for reconciliation below, so they have to
+        -- exist BEFORE the allocator call, not be recomputed after it in
+        -- the final SELECT where they could silently drift from what got
+        -- staged.
+        {{ record_lineage_event_decision_transition('l.quality_status', 'l.is_trusted', 'c.quality_status', 'c.is_trusted') }} as decision_transition,
+        {{ dbt.current_timestamp() }} as logged_at
     from current_state c
     left join last_logged_current l on l.record_token = c.record_token
     where l.record_token is null
@@ -220,13 +236,30 @@ changed_candidates as (
 -- - dropping that row here, before it ever reaches this model's own
 -- INSERT, is what stops both writers from appending a row for the same
 -- decision.
+--
+-- ALLOCATOR/LEDGER ATOMICITY (see issue #11 and lineage_seq_udf.py's own
+-- "FORMER KNOWN LIMITATION, CLOSED" section): the payload JSON passed as
+-- next_event_sequence_if_new()'s third argument is the exact row this
+-- model is about to INSERT for this decision (everything below except
+-- record_token/event_sequence/decision_fingerprint/ledger_key, which the
+-- allocator's own outbox table already carries as first-class columns).
+-- It gets staged durably in the SAME atomic Postgres statement as the
+-- sequence allocation, so if THIS run's own INSERT below never lands
+-- (crash, failure), infra-setup/scripts/lineage_ledger_reconciliation.py
+-- can replay it later from that staged payload - closing the gap where an
+-- allocated-but-never-logged decision used to be lost with no possible
+-- retry.
 changed as (
 
     select *
     from (
         select
             *,
-            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+            next_event_sequence_if_new(
+                record_token,
+                decision_fingerprint,
+                {{ record_lineage_event_payload_json('dataset', 'source_event_id', 'pipeline_run_id', 'cdc_operation', 'quality_status', 'failed_checks', 'is_trusted', 'is_quarantined', 'previous_decision_fingerprint', 'decision_transition', 'logged_at') }}
+            ) as event_sequence
         from changed_candidates
     )
     where event_sequence is not null
@@ -256,7 +289,15 @@ changed_candidates as (
         cast(null as boolean) as previous_is_trusted,
         cast(null as boolean) as previous_is_quarantined,
         cast(null as varchar) as previous_decision_fingerprint,
-        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint
+        {{ record_lineage_event_decision_fingerprint('c.record_token', 'c.source_event_id', 'c.quality_status', 'c.failed_checks', 'c.is_trusted', 'c.is_quarantined') }} as decision_fingerprint,
+        -- Same "computed once, before the allocator call" reasoning as the
+        -- incremental branch above - previous_quality_status/
+        -- previous_is_trusted are always null here (first run, no prior
+        -- decision exists for any record_token yet), which
+        -- record_lineage_event_decision_transition() already renders as
+        -- "(new) -> ...", the correct value for a seed row.
+        {{ record_lineage_event_decision_transition('cast(null as varchar)', 'cast(null as boolean)', 'c.quality_status', 'c.is_trusted') }} as decision_transition,
+        {{ dbt.current_timestamp() }} as logged_at
     from current_state c
 
 ),
@@ -267,7 +308,11 @@ changed as (
     from (
         select
             *,
-            next_event_sequence_if_new(record_token, decision_fingerprint) as event_sequence
+            next_event_sequence_if_new(
+                record_token,
+                decision_fingerprint,
+                {{ record_lineage_event_payload_json('dataset', 'source_event_id', 'pipeline_run_id', 'cdc_operation', 'quality_status', 'failed_checks', 'is_trusted', 'is_quarantined', 'previous_decision_fingerprint', 'decision_transition', 'logged_at') }}
+            ) as event_sequence
         from changed_candidates
     )
     where event_sequence is not null
@@ -288,28 +333,18 @@ select
     -- called with to decide whether this row is a genuinely new decision.
     decision_fingerprint,
     previous_decision_fingerprint,
-    -- Human-readable "what changed", read straight off the row instead of
-    -- reconstructed by joining this table to itself: "(new)" for a
-    -- record_token's first-ever logged decision, otherwise
-    -- "<prior status>/<trusted|quarantined> -> <new status>/<trusted|quarantined>".
-    -- DELETED is printed bare (no "/trusted"|"/quarantined" suffix) -
-    -- is_trusted/is_quarantined are just false/false for a deleted record
-    -- (nothing to be trusted or quarantined), so appending either word
-    -- would misleadingly imply a quality-gate outcome that was never
-    -- computed.
-    coalesce(
-        case
-            when previous_quality_status = 'DELETED' then 'DELETED'
-            when previous_quality_status is not null then
-                previous_quality_status || '/' ||
-                    (case when previous_is_trusted then 'trusted' else 'quarantined' end)
-        end,
-        '(new)'
-    ) || ' -> ' ||
-        case
-            when quality_status = 'DELETED' then 'DELETED'
-            else quality_status || '/' || (case when is_trusted then 'trusted' else 'quarantined' end)
-        end as decision_transition,
+    -- Human-readable "what changed" ("(new)" for a record_token's
+    -- first-ever logged decision, otherwise "<prior status>/<trusted|
+    -- quarantined> -> <new status>/<trusted|quarantined>", DELETED printed
+    -- bare - see record_lineage_event_decision_transition()'s own comment
+    -- for why). Read straight off the passthrough column computed once, up
+    -- in changed_candidates, via macros/lineage.sql's
+    -- record_lineage_event_decision_transition() - not recomputed here -
+    -- specifically so this can never drift from the exact value staged
+    -- into the reconciliation payload (see the `changed` CTE's own
+    -- comment above), the same reason decision_fingerprint is handled this
+    -- way.
+    decision_transition,
     source_event_id,
     pipeline_run_id,
     cdc_operation,
@@ -317,5 +352,9 @@ select
     failed_checks,
     is_trusted,
     is_quarantined,
-    {{ dbt.current_timestamp() }} as logged_at
+    -- Read straight off the passthrough column (see decision_transition's
+    -- comment just above) - not `{{ dbt.current_timestamp() }}` evaluated
+    -- again here, which would give this row a DIFFERENT timestamp than the
+    -- one already staged into the reconciliation payload above.
+    logged_at
 from changed
