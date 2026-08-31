@@ -75,21 +75,51 @@ literal same decision twice, exactly the retry-safety property this
 model's docstring already claims record_lineage_event has, now made safe
 under real concurrent writers too, not just retries of a single writer.
 
-KNOWN LIMITATION: this allocates/records atomically but does not
-participate in DuckDB's own transaction - if the surrounding `dbt run`'s
-INSERT into record_lineage_event fails or is rolled back AFTER this
-function has already committed a "new decision" allocation (autocommit, by
-design - see below), that decision is marked as logged in the allocator
-table but never actually appears in the ledger, and will never be retried
-(the allocator would report it as already-logged on the next run). Not
-expected under this pipeline's normal operation: every workflow run in this
-repo starts from a freshly created Postgres database (`docker compose
-down -v`), so the allocator table and the ledger are always built up
-together from empty, and nothing here does `dbt run --full-refresh`
-mid-session (which would rebuild the ledger from nothing while leaving the
-allocator's state in place, reintroducing exactly this kind of mismatch -
-not attempted here, and would need the allocator table truncated in step
-with any future full-refresh of this model).
+FORMER KNOWN LIMITATION, CLOSED (see issue #11): this allocates/records
+atomically but does not participate in DuckDB's own transaction - if the
+surrounding `dbt run`'s INSERT into record_lineage_event fails or is
+rolled back AFTER this function has already committed a "new decision"
+allocation (autocommit, by design - see below), that decision used to be
+marked as logged in the allocator table but never actually appear in the
+ledger, with no way to ever retry it (the allocator would report it as
+already-logged on the next attempt). reliability-tests/15_lineage_allocator_atomicity.md's
+check 4 characterized this exactly, and it is STILL true at the allocator
+level today - that has not changed and cannot change without giving up the
+retry-suppression property this function exists to provide.
+
+What changed: this function no longer only records "has this decision been
+allocated" - it durably stages the FULL row `record_lineage_event.sql`
+would insert (as JSON, in `lineage_seq.record_lineage_event_outbox`,
+written by the SAME atomic Postgres statement as the allocation itself, see
+_ALLOCATE_IF_NEW below) at the moment of allocation. A dbt run that dies or
+whose own INSERT fails after this commits no longer loses that decision -
+it leaves a durable, replayable staged row behind. `infra-setup/scripts/
+lineage_ledger_reconciliation.py` is the repair pass: it finds every staged
+outbox row with no matching `gold.record_lineage_event` row and replays the
+INSERT from the staged payload, preserving the original event_sequence (so
+the dense-sequence invariant `tests/assert_record_lineage_event_sequence_is_dense_and_unique.sql`
+enforces is never violated by a repair landing out of order). See that
+script's own module docstring for why this is a reconciliation/outbox
+design rather than a two-phase commit across DuckDB and Postgres - two
+genuinely independent transactional systems with no distributed-transaction
+coordinator between them here, and the choice this project made in favor of
+a detectable invariant + repair job over that operational complexity.
+
+This still doesn't make the allocation and the ledger insert ONE atomic
+unit - it closes the actual failure mode that mattered ("a lost lineage
+event that no retry can ever recover", per issue #11) without needing
+distributed transactions to do it: every committed allocation now
+eventually has exactly one corresponding ledger row, either because the
+original `dbt run`'s own INSERT landed it, or because reconciliation
+replayed it from the durable outbox.
+
+Not expected to ever leave an outbox row un-repaired under this pipeline's
+normal operation - every workflow run starts from a freshly created
+Postgres database - but unlike before, if it ever does happen (a real
+production deployment persisting Postgres across restarts/failures, or a
+future `dbt run --full-refresh` of this model without truncating the
+allocator alongside it), the outbox row is what makes that decision
+recoverable rather than a silent, permanent loss.
 
 REAL RUN CAUGHT ONE MORE THING before this was even exercised under
 concurrency: e2e-pipeline.yml run 33303628943 failed the very FIRST
@@ -119,6 +149,40 @@ CREATE TABLE IF NOT EXISTS lineage_seq.record_lineage_event_seq (
     next_seq bigint NOT NULL DEFAULT 0,
     last_decision_fingerprint varchar
 );
+-- The durable outbox: one row per decision this function has ever
+-- allocated a sequence for, holding the exact row record_lineage_event.sql
+-- would insert for it (see macros/lineage.sql's
+-- record_lineage_event_payload_json()), so a decision that got allocated
+-- but never actually landed in the ledger can be replayed from here
+-- instead of being permanently lost - see the module docstring's
+-- "FORMER KNOWN LIMITATION, CLOSED" section and
+-- infra-setup/scripts/lineage_ledger_reconciliation.py, the repair pass
+-- that reads this table. Append-only and keyed on (record_token,
+-- event_sequence), NOT on record_token alone like the counter table above
+-- - unlike the counter (which only ever needs to remember the LATEST
+-- allocation per record_token), every allocation this function has ever
+-- made must stay staged here, independent of whatever the counter table
+-- has since moved on to, or an orphan could be silently overwritten by a
+-- later, unrelated decision for the same record_token before it's ever
+-- repaired.
+CREATE TABLE IF NOT EXISTS lineage_seq.record_lineage_event_outbox (
+    record_token varchar NOT NULL,
+    event_sequence bigint NOT NULL,
+    decision_fingerprint varchar NOT NULL,
+    payload jsonb NOT NULL,
+    allocated_at timestamptz NOT NULL DEFAULT now(),
+    -- Set by the reconciliation pass once it has confirmed (not assumed -
+    -- see that script) a matching row exists in gold.record_lineage_event,
+    -- whether that row landed via the original dbt run's own INSERT or via
+    -- a later repair. Deliberately never set by this module itself: this
+    -- module only knows an allocation committed in Postgres, never whether
+    -- the DuckDB/DuckLake INSERT that's supposed to follow it actually
+    -- succeeded - that's exactly the gap this whole mechanism exists to
+    -- survive. NULL means "not yet confirmed present in the ledger",
+    -- which reconciliation treats as "go check", not "definitely missing".
+    committed_at timestamptz,
+    PRIMARY KEY (record_token, event_sequence)
+);
 """
 
 # See module docstring for the full mechanism. The ON CONFLICT ... WHERE
@@ -126,16 +190,33 @@ CREATE TABLE IF NOT EXISTS lineage_seq.record_lineage_event_seq (
 # next sequence number" a single atomic operation instead of two - a
 # concurrent loser's UPDATE simply doesn't match its own WHERE (the winner
 # already wrote this exact fingerprint) and RETURNING yields no row.
+#
+# The outbox INSERT is folded into the SAME statement via a CTE, not a
+# second round trip - a single multi-statement SQL string executes as one
+# implicit transaction against Postgres even under autocommit, so the
+# sequence allocation and the durable payload staging commit together or
+# not at all. When `allocated` yields no row (this call lost the race, or
+# it's a genuine retry of an already-logged decision), the outer INSERT ...
+# SELECT ... FROM allocated has nothing to select and inserts nothing - the
+# outbox only ever gains a row for a call that actually won the allocation,
+# exactly mirroring what the counter table itself does.
 _ALLOCATE_IF_NEW = """
-INSERT INTO lineage_seq.record_lineage_event_seq
-    (record_token, next_seq, last_decision_fingerprint)
-VALUES (%(record_token)s, 1, %(decision_fingerprint)s)
-ON CONFLICT (record_token) DO UPDATE
-    SET next_seq = record_lineage_event_seq.next_seq + 1,
-        last_decision_fingerprint = %(decision_fingerprint)s
-    WHERE record_lineage_event_seq.last_decision_fingerprint
-        IS DISTINCT FROM %(decision_fingerprint)s
-RETURNING next_seq;
+WITH allocated AS (
+    INSERT INTO lineage_seq.record_lineage_event_seq
+        (record_token, next_seq, last_decision_fingerprint)
+    VALUES (%(record_token)s, 1, %(decision_fingerprint)s)
+    ON CONFLICT (record_token) DO UPDATE
+        SET next_seq = record_lineage_event_seq.next_seq + 1,
+            last_decision_fingerprint = %(decision_fingerprint)s
+        WHERE record_lineage_event_seq.last_decision_fingerprint
+            IS DISTINCT FROM %(decision_fingerprint)s
+    RETURNING next_seq
+)
+INSERT INTO lineage_seq.record_lineage_event_outbox
+    (record_token, event_sequence, decision_fingerprint, payload)
+SELECT %(record_token)s, next_seq, %(decision_fingerprint)s, %(payload)s::jsonb
+FROM allocated
+RETURNING event_sequence;
 """
 
 
@@ -216,7 +297,14 @@ class Plugin(BasePlugin):
         conn.create_function(
             "next_event_sequence_if_new",
             self._next_event_sequence_if_new,
-            ["VARCHAR", "VARCHAR"],
+            # Third argument: the JSON-encoded full row this decision would
+            # insert into gold.record_lineage_event, built by
+            # macros/lineage.sql's record_lineage_event_payload_json() -
+            # staged into the outbox atomically alongside the allocation
+            # itself (see _ALLOCATE_IF_NEW above), not used for the
+            # allocate-or-suppress decision, which still turns entirely on
+            # (record_token, decision_fingerprint) exactly as before.
+            ["VARCHAR", "VARCHAR", "VARCHAR"],
             "BIGINT",
             # DuckDB's DEFAULT null handling (the create_function default)
             # filters any row with a NULL *input* before calling the Python
@@ -239,12 +327,16 @@ class Plugin(BasePlugin):
         )
 
     def _next_event_sequence_if_new(
-        self, record_token: str, decision_fingerprint: str
+        self, record_token: str, decision_fingerprint: str, payload_json: str
     ) -> Optional[int]:
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
                 _ALLOCATE_IF_NEW,
-                {"record_token": record_token, "decision_fingerprint": decision_fingerprint},
+                {
+                    "record_token": record_token,
+                    "decision_fingerprint": decision_fingerprint,
+                    "payload": payload_json,
+                },
             )
             row = cur.fetchone()
             return row[0] if row is not None else None

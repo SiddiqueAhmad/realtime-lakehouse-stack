@@ -832,6 +832,20 @@ jobs:
         # elsewhere in this job.
         run: .venv/bin/python3 infra-setup/scripts/lineage_allocator_concurrency_test.py
 
+      - name: Run scenario 16 (allocator/ledger reconciliation, issue #11)
+        # reliability-tests/16_lineage_ledger_reconciliation.md, automated.
+        # Proves the fix for the gap scenario 15's check 4 characterizes:
+        # an allocation with no corresponding gold.record_lineage_event row
+        # is detected and repaired from its durably staged outbox payload
+        # (infra-setup/scripts/lineage_ledger_reconciliation.py), at its
+        # original event_sequence, idempotently, and across repeated
+        # orphans on the same record_token. Uses its own dedicated,
+        # uuid-based synthetic record_token values - cannot collide with
+        # scenario 14/15's or any real record_token - so ordering relative
+        # to those doesn't matter. The script's own exit code is this
+        # step's pass/fail signal, matching scenario 15's own pattern.
+        run: .venv/bin/python3 infra-setup/scripts/lineage_ledger_reconciliation_test.py
+
       - name: Collect diagnostics on failure
         # A bare "job failed" with no logs is useless for triaging a
         # multi-service pipeline. Every service's log, plus dbt's own log,

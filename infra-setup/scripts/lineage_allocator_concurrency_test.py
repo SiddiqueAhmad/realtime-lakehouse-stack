@@ -39,22 +39,26 @@ lineage_seq_udf.py runs in production):
      than scenario 14's single 2-writer/5-decision race — see that
      scenario's own doc, which calls this out as legitimate follow-up
      work rather than something its single CI step claims to replace.
-  4. The allocator module's own documented KNOWN LIMITATION, made an
-     executable, CI-checked characterization instead of only a docstring
-     claim: an allocation that commits in Postgres but is never followed
-     by the corresponding DuckLake ledger INSERT (the exact shape a
-     `dbt run` process dying, or its own INSERT failing, between those
-     two steps would produce) leaves that decision permanently
-     unretriable — a later call with the identical (record_token,
-     decision_fingerprint) returns NULL, exactly as if it had already
-     been safely logged. This is EXPECTED, CURRENT, documented behavior
-     (see lineage_seq_udf.py's own "KNOWN LIMITATION" section) — this
-     test proves it is still true today, not that it's fine. It is
-     reported as a warning, not a failure, and the test PASSES when the
-     documented gap reproduces exactly as documented; it is meant to
-     catch the day someone "fixes" this gap without updating the
-     documentation (or reintroduces it after a real fix), not to gate
-     merges on an accepted, known limitation.
+  4. The allocator's own retry-suppression behavior, still exactly as
+     documented after issue #11's fix: an allocation that commits in
+     Postgres but is never followed by the corresponding DuckLake ledger
+     INSERT (the exact shape a `dbt run` process dying, or its own INSERT
+     failing, between those two steps would produce) still leaves a LATER
+     call with the identical (record_token, decision_fingerprint) getting
+     NULL back, exactly as if it had already been safely logged - that
+     part of the mechanism is untouched and must stay untouched (it's the
+     same "is this decision actually new" check that stops duplicate
+     decisions under concurrency in checks 1-3 above). What changed since
+     this check was first written: that NULL no longer means the decision
+     is unretriable/lost - _ALLOCATE_IF_NEW now durably stages the full
+     row into lineage_seq.record_lineage_event_outbox in the SAME atomic
+     statement as the allocation (see lineage_seq_udf.py's own docstring),
+     so infra-setup/scripts/lineage_ledger_reconciliation.py can replay it
+     later. This check only proves the allocator's own suppression
+     behavior is unchanged; scenario 16
+     (reliability-tests/16_lineage_ledger_reconciliation.md) is what proves
+     the outbox/reconciliation repair actually recovers the decision this
+     check simulates losing.
 
 Independent OS processes throughout (multiprocessing.Process, not
 threads), matching scenario 14's own reasoning for why that distinction
@@ -75,6 +79,7 @@ Exit 0 on success (including the expected, documented gap in check 4),
 exit 1 if any check finds unexpected/incorrect allocator behavior.
 """
 
+import json
 import multiprocessing
 import os
 import sys
@@ -108,14 +113,29 @@ def _allocate_worker(record_token, decision_fingerprint, barrier, result_queue):
     (never share one across a fork - psycopg2 connections are not
     fork-safe), waits at the barrier so every worker in this race issues
     its allocate call within microseconds of the others, then reports
-    exactly what the allocator returned."""
+    exactly what the allocator returned.
+
+    The payload is a fixed, synthetic stand-in for the real JSON row
+    macros/lineage.sql's record_lineage_event_payload_json() would build -
+    this scenario only exercises the allocate-or-suppress race itself (see
+    module docstring), never reads the payload back, so its content doesn't
+    matter here. It has to be a valid, non-null JSON value: since PR closing
+    issue #11, _ALLOCATE_IF_NEW stages this payload into
+    lineage_seq.record_lineage_event_outbox atomically alongside the
+    allocation (see lineage_seq_udf.py), and that column is NOT NULL -
+    reconciliation (scenario 16) is what actually exercises a real payload's
+    content."""
     conn = alloc._connect()
     conn.autocommit = True
     barrier.wait()
     with conn.cursor() as cur:
         cur.execute(
             alloc._ALLOCATE_IF_NEW,
-            {"record_token": record_token, "decision_fingerprint": decision_fingerprint},
+            {
+                "record_token": record_token,
+                "decision_fingerprint": decision_fingerprint,
+                "payload": json.dumps({"scenario": "15", "decision_fingerprint": decision_fingerprint}),
+            },
         )
         row = cur.fetchone()
     conn.close()
@@ -239,12 +259,16 @@ def check_stress_sweep(writer_counts=(2, 4, 8), iterations=25):
 
 
 def check_allocation_without_ledger_insert_gap():
-    """Check 4: characterizes (does NOT fix) the allocator module's own
-    documented KNOWN LIMITATION. See this script's module docstring, item
-    4, for the full reasoning. This check PASSES when the documented gap
-    is confirmed still present and behaving exactly as documented - it
-    exists to keep that claim honest and CI-checked, not to imply the gap
-    is acceptable to ignore."""
+    """Check 4: characterizes the allocator's own retry-suppression
+    behavior on a decision whose ledger INSERT never happened - see this
+    script's module docstring, item 4. This check PASSES when a retry of
+    the identical (record_token, decision_fingerprint) still comes back
+    NULL, exactly as lineage_seq_udf.py documents. Since issue #11's fix,
+    that NULL is no longer "permanently lost" - see scenario 16
+    (reliability-tests/16_lineage_ledger_reconciliation.md) for the check
+    that the outbox row this same allocation call staged is what actually
+    makes it recoverable. This check only proves the suppression behavior
+    itself hasn't drifted, positively or negatively."""
     record_token = f"scenario15-gap-{uuid.uuid4()}"
     fingerprint = "fp-Z"
 
@@ -262,20 +286,19 @@ def check_allocation_without_ledger_insert_gap():
 
     if retry is not None:
         raise AssertionError(
-            f"check 4: expected a retry after a phantom allocation to be suppressed (NULL) per the "
-            f"documented KNOWN LIMITATION in lineage_seq_udf.py, but got event_sequence={retry} instead "
-            f"- either the allocator's behavior changed (update this test AND that module's docstring "
+            f"check 4: expected a retry after a phantom allocation to still be suppressed (NULL) - this is "
+            f"the same 'is this decision actually new' check checks 1-3 above depend on, not something "
+            f"issue #11's fix touched - but got event_sequence={retry} instead: either the allocator's "
+            f"suppression behavior regressed (update this test AND lineage_seq_udf.py's docstring "
             f"together) or something else is wrong."
         )
     print(
-        "check 4 PASSED (confirms a KNOWN, ACCEPTED limitation - not a clean result): an allocation that "
-        "commits in Postgres with no corresponding DuckLake ledger row ever landing leaves a retry for "
-        "the identical decision permanently suppressed (NULL) - reproduces lineage_seq_udf.py's own "
-        "documented gap exactly. This is not caught as a bug by this scenario; it is tracked as an "
-        "architectural limitation the pipeline currently accepts (see that module's KNOWN LIMITATION "
-        "section and README.md's known-gaps section for why: every workflow run starts from a fresh "
-        "Postgres database, so this pipeline never actually exercises the full-refresh-after-partial-"
-        "failure scenario that would surface it in practice today)."
+        "check 4 PASSED: an allocation that commits in Postgres with no corresponding DuckLake ledger row "
+        "ever landing still leaves a retry for the identical decision suppressed (NULL), exactly as "
+        "lineage_seq_udf.py documents - that part of the mechanism is unchanged by issue #11's fix. What "
+        "changed: this is no longer a permanent loss - the same allocation call durably staged this "
+        "decision's full row into lineage_seq.record_lineage_event_outbox, which scenario 16 "
+        "(reliability-tests/16_lineage_ledger_reconciliation.md) proves reconciliation can replay."
     )
 
 
