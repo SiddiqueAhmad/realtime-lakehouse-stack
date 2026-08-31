@@ -74,6 +74,28 @@ with anything scenario 14 uses, so this can safely run before or after
 scenario 14 in the same workflow without disturbing either one's table-
 state assertions.
 
+CLEANUP IS NOT OPTIONAL, and this script's own responsibility: since issue
+#11's fix, every call to the real allocator - which this script uses
+directly, on purpose (see above) - durably stages a row in
+lineage_seq.record_lineage_event_outbox, a table this script SHARES with
+every real pipeline run and with anything (a later CI step, a production
+reconciliation job) that later scans that outbox looking for orphans to
+repair. A real e2e-pipeline.yml run (33352891077) confirmed this concretely:
+without cleanup, this script's own synthetic, deliberately-incomplete
+payloads (see _allocate_worker's own docstring - it never needs the
+payload's actual content) were left behind in the shared outbox, and the
+very next step in that same job - scenario 16's reconciliation test -
+tried to replay them and blew up with a KeyError building the ledger row
+from a payload with none of the real fields it expects. Worse, had that
+payload instead been made "valid" to dodge the KeyError, reconciliation
+would have happily inserted 100+ synthetic scenario15- rows into the REAL
+gold.record_lineage_event ledger - directly violating this scenario's own
+"doesn't touch DuckDB/DuckLake at all" design. main() therefore always
+deletes every row this run created (matching the "scenario15-" prefix,
+which cannot collide with anything else) from BOTH lineage_seq tables
+before exiting, success or failure, restoring exactly the isolation this
+scenario has always claimed for the DuckLake side to the Postgres side too.
+
 Usage: lineage_allocator_concurrency_test.py
 Exit 0 on success (including the expected, documented gap in check 4),
 exit 1 if any check finds unexpected/incorrect allocator behavior.
@@ -105,6 +127,27 @@ def _ensure_ddl():
             # and this script may run after real dbt processes have
             # already created this schema/table.
             pass
+    conn.close()
+
+
+def _cleanup_synthetic_allocations():
+    """Deletes every row this script's own synthetic 'scenario15-' tokens
+    created in BOTH lineage_seq tables - see module docstring's "CLEANUP IS
+    NOT OPTIONAL" section for why this isn't just tidiness: this script's
+    payloads are deliberately incomplete (see _allocate_worker), and the
+    outbox is a table real reconciliation runs (this workflow's own
+    post-pipeline step, scenario 16, and any future production job per
+    issue #13) scan in full, not scoped to any one scenario's tokens.
+    Deleting from the outbox before the counter table matters here even
+    though there's no foreign key between them: harmless either order in
+    practice, but outbox-then-counter mirrors "retire the durable
+    obligation before the thing that could recreate it" rather than the
+    reverse."""
+    conn = alloc._connect()
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM lineage_seq.record_lineage_event_outbox WHERE record_token LIKE 'scenario15-%'")
+        cur.execute("DELETE FROM lineage_seq.record_lineage_event_seq WHERE record_token LIKE 'scenario15-%'")
     conn.close()
 
 
@@ -310,12 +353,19 @@ def main() -> int:
         check_stress_sweep,
         check_allocation_without_ledger_insert_gap,
     ]
-    for check in checks:
-        try:
-            check()
-        except AssertionError as e:
-            print(f"::error::scenario 15: {e}", file=sys.stderr)
-            return 1
+    try:
+        for check in checks:
+            try:
+                check()
+            except AssertionError as e:
+                print(f"::error::scenario 15: {e}", file=sys.stderr)
+                return 1
+    finally:
+        # Always, success or failure - see module docstring's "CLEANUP IS
+        # NOT OPTIONAL" section. A run that fails a check still allocated
+        # real outbox rows before failing; leaving those behind would be
+        # exactly the pollution this cleanup exists to prevent, failure or not.
+        _cleanup_synthetic_allocations()
     print("Scenario 15 passed: the lineage allocator (next_event_sequence_if_new) correctly serializes "
           "same-decision races at higher concurrency than scenario 14 exercises, correctly allocates "
           "distinct sequence numbers for genuinely different decisions racing on the same record_token, "

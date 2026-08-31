@@ -135,6 +135,20 @@ def _fake_payload(**overrides) -> dict:
     return base
 
 
+def _own_failures(summary, record_token: str, event_sequence: int):
+    """Filters reconcile()'s summary['failed'] down to entries for THIS
+    check's own (record_token, event_sequence) - the outbox is a table
+    shared with every real pipeline run and every other scenario in the
+    same CI job (a real run, e2e-pipeline.yml 33352891077, confirmed this
+    concretely: scenario 15's own leftover synthetic allocations, before
+    it started cleaning up after itself, showed up as unrelated 'failed'
+    entries in THIS scenario's reconcile() calls). Asserting a globally
+    empty summary['failed'] would make this test fail on pollution from
+    somewhere else entirely - what actually matters for each check here is
+    only whether ITS OWN row was reconciled correctly."""
+    return [f for f in summary["failed"] if f[0] == record_token and f[1] == event_sequence]
+
+
 def _ledger_row(duck_con, record_token: str, event_sequence: int):
     cols = (
         "dataset, record_token, ledger_key, event_sequence, decision_fingerprint, "
@@ -168,8 +182,9 @@ def check_orphan_detected_and_repaired():
         raise AssertionError(f"check 1 setup: expected NO ledger row before reconciliation, found {before}")
 
     summary = reconciler.reconcile(pg_conn, duck_con)
-    if summary["repaired"] < 1 or summary["failed"]:
-        raise AssertionError(f"check 1: expected at least 1 repair and 0 failures, got summary={summary}")
+    own_failures = _own_failures(summary, record_token, 1)
+    if own_failures:
+        raise AssertionError(f"check 1: reconciliation reported a failure for our own row: {own_failures}")
 
     after = _ledger_row(duck_con, record_token, 1)
     if after is None:
@@ -207,8 +222,9 @@ def check_orphan_detected_and_repaired():
 
 def check_repair_is_idempotent(record_token, pg_conn, duck_con):
     summary = reconciler.reconcile(pg_conn, duck_con)
-    if summary["repaired"] != 0 or summary["failed"]:
-        raise AssertionError(f"check 2: expected a second pass to repair nothing new, got summary={summary}")
+    own_failures = _own_failures(summary, record_token, 1)
+    if own_failures:
+        raise AssertionError(f"check 2: a second pass reported a failure for our own already-repaired row: {own_failures}")
 
     dup = duck_con.execute(
         "SELECT count(*) FROM gold.record_lineage_event WHERE record_token = ? AND event_sequence = 1",
@@ -234,8 +250,9 @@ def check_second_orphan_keeps_sequence_dense(record_token, pg_conn, duck_con):
         raise AssertionError(f"check 3 setup: expected the second decision for {record_token} to get event_sequence=2, got {seq}")
 
     summary = reconciler.reconcile(pg_conn, duck_con)
-    if summary["repaired"] < 1 or summary["failed"]:
-        raise AssertionError(f"check 3: expected the second orphan to be repaired, got summary={summary}")
+    own_failures = _own_failures(summary, record_token, 2)
+    if own_failures:
+        raise AssertionError(f"check 3: reconciliation reported a failure for our own second orphan: {own_failures}")
 
     seqs = sorted(
         r[0]
@@ -304,8 +321,9 @@ def check_concurrent_reconciliation_is_claim_safe(pg_conn, duck_con):
     # Nothing holds the claim anymore - a normal reconcile() call must
     # repair it exactly as check 1 proved for an uncontended orphan.
     summary = reconciler.reconcile(pg_conn, duck_con)
-    if summary["repaired"] < 1 or summary["failed"]:
-        raise AssertionError(f"check 4: expected the orphan to be repaired once its claim was released, got summary={summary}")
+    own_failures = _own_failures(summary, record_token, 1)
+    if own_failures:
+        raise AssertionError(f"check 4: reconciliation reported a failure for our own row after releasing the claim: {own_failures}")
     after = _ledger_row(duck_con, record_token, 1)
     if after is None:
         raise AssertionError("check 4: expected a ledger row to exist after the claim was released and reconciliation re-ran")
