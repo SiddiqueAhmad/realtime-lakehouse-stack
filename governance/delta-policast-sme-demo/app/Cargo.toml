@@ -1,0 +1,17 @@
+[package]
+name = "governed-delta-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+
+# Keep these aligned with Policast's current workspace pins.
+datafusion = "53.1"
+deltalake = { version = "0.32.4", features = ["datafusion", "s3"] }
+
+# Pin Policast to the revision inspected for this demo.
+policast-core = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-core" }
+policast-datafusion = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-datafusion", features = ["delta"] }
