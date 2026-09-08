@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Governance Control Plane</title>
+<style>
+:root{--bg:#0b0d10;--panel:#13171c;--panel2:#191f25;--text:#eef2f5;--muted:#9aa7b2;--line:#28313a;--accent:#8be9c1;--warn:#ffd166;--bad:#ff7b7b;--good:#77e3a8;--blue:#89b4ff;--shadow:0 18px 55px rgba(0,0,0,.28)}
+*{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,#090b0e,#101419 45%,#0b0d10);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+button,input,select,textarea{font:inherit} button{cursor:pointer}.shell{max-width:1440px;margin:auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:22px}.eyebrow{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:700}.title{font-size:30px;font-weight:750;letter-spacing:-.025em;margin:6px 0}.subtitle{color:var(--muted);max-width:760px}.badgebar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.badge{border:1px solid var(--line);background:#11161a;border-radius:999px;padding:7px 11px;color:#c8d1d8;font-size:12px}.badge.good{border-color:#2e7254;color:var(--good)}.badge.warn{border-color:#7b6330;color:var(--warn)}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:20px 0}.kpi,.card{background:rgba(19,23,28,.94);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}.kpi{padding:16px}.kpi .n{font-size:27px;font-weight:750}.kpi .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.card{padding:18px}.card h2{font-size:17px;margin:0 0 4px}.hint{color:var(--muted);font-size:12px;margin-bottom:15px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{margin-bottom:11px}.field label{display:block;color:#cbd5dc;font-size:12px;margin-bottom:5px}.input,select,textarea{width:100%;background:#0e1216;color:var(--text);border:1px solid #313c46;border-radius:9px;padding:9px 10px;outline:none}.input:focus,select:focus,textarea:focus{border-color:#5fae8d}.rule{min-height:104px;resize:vertical}.cedar{min-height:180px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;resize:vertical}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid #34404a;background:#1a2229;color:#edf3f6;border-radius:9px;padding:9px 12px;font-weight:650}.btn:hover{background:#222c34}.btn.primary{background:#8be9c1;color:#0b1711;border-color:#8be9c1}.btn.primary:hover{background:#a0f3d0}.btn.danger{border-color:#6b3e42;color:#ffaaaa}.btn:disabled{opacity:.45;cursor:not-allowed}.templates{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 10px}.chip{font-size:11px;border:1px solid #35424c;background:#11171c;color:#b9c8d2;border-radius:999px;padding:5px 8px;cursor:pointer}.chip:hover{border-color:#608376}
+.status{margin-top:12px;border:1px solid var(--line);background:#0d1115;border-radius:10px;padding:10px 12px;color:var(--muted);min-height:44px}.status.good{border-color:#315f49;color:var(--good)}.status.bad{border-color:#6c3538;color:#ffaaaa}.status.warn{border-color:#6b5a2e;color:var(--warn)}.meta{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}.tag{font-size:11px;background:#1b252c;border:1px solid #2b3942;padding:4px 7px;border-radius:999px;color:#bdd0db}
+.policylist{display:grid;gap:9px;margin-top:12px}.policy{border:1px solid #2a343d;background:#0e1317;border-radius:11px;padding:11px}.policy .head{display:flex;justify-content:space-between;gap:10px}.policy .pid{font-weight:700}.policy .small{color:var(--muted);font-size:11px}.policy code{color:#c9e6da}.identity{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.identity .tag{background:#15201d;border-color:#28493c}
+.section{margin-top:14px}.tabs{display:flex;gap:8px;margin-bottom:10px}.tab{border:1px solid var(--line);background:#10151a;color:#aebbc5;padding:7px 10px;border-radius:8px}.tab.active{background:#1b242b;color:white;border-color:#43515d}.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid #242d34;vertical-align:top}th{background:#12181d;color:#9fb0bc;font-size:11px;text-transform:uppercase;letter-spacing:.06em;position:sticky;top:0}td{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}.muted{color:var(--muted)}.okdot,.offdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.okdot{background:var(--good)}.offdot{background:#697680}.footer{color:#75828d;font-size:11px;text-align:center;margin:18px 0 4px}.split-note{background:#111a1d;border:1px solid #2c4e45;border-radius:10px;padding:10px 12px;margin-bottom:12px;color:#bfe6d7}.loading{opacity:.6}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}.top{flex-direction:column}.badgebar{justify-content:flex-start}.shell{padding:18px}.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div>
+      <div class="eyebrow">Governed Data Foundation</div>
+      <div class="title">Governance Control Plane</div>
+      <div class="subtitle">Author, validate, bind and review access policies centrally. AI helps draft policy changes; deterministic validation and explicit human approval remain mandatory.</div>
+    </div>
+    <div class="badgebar">
+      <span class="badge good">AI drafts</span>
+      <span class="badge warn">Human approves</span>
+      <span class="badge">Engine enforces</span>
+      <span class="badge" id="aiBadge">AI status…</span>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="n" id="kPrincipals">–</div><div class="l">Principals</div></div>
+    <div class="kpi"><div class="n" id="kPolicies">–</div><div class="l">Policies</div></div>
+    <div class="kpi"><div class="n" id="kBindings">–</div><div class="l">Bindings</div></div>
+    <div class="kpi"><div class="n" id="kTables">–</div><div class="l">Governed datasets</div></div>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>AI-assisted policy studio</h2>
+      <div class="hint">Describe one access rule. The assistant may draft Cedar and a binding, but it cannot activate either.</div>
+      <div class="split-note"><strong>Control-plane only:</strong> this UI never asks AI to query business data and does not expose a second data-access path.</div>
+      <div class="row">
+        <div class="field"><label>Dataset</label><select id="draftTable"></select></div>
+        <div class="field"><label>Principal selector</label><select id="draftSelector"></select></div>
+      </div>
+      <div class="templates">
+        <button class="chip" data-rule="Allow this role to read only rows where resource.region equals principal.region.">Region scope</button>
+        <button class="chip" data-rule="Allow this role to read only rows where resource.company_id equals principal.company_id and resource.branch equals principal.branch.">Company + branch</button>
+        <button class="chip" data-rule="Mask the ssn column for this selector on every returned row.">Mask SSN</button>
+        <button class="chip" data-rule="Deny rows where resource.legal_hold equals true unless the principal role is legal.">Legal-hold deny</button>
+      </div>
+      <div class="field"><label>Business rule</label><textarea class="input rule" id="rule" placeholder="Example: Allow analysts to see only rows where region matches their region."></textarea></div>
+      <div class="actions">
+        <button class="btn primary" id="aiDraft">Draft with AI</button>
+        <button class="btn" id="validate">Validate draft</button>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <div class="field"><label>Policy key</label><input class="input" id="policyKey" /></div>
+        <div class="field"><label>Binding ID</label><input class="input" id="bindingId" /></div>
+      </div>
+      <div class="field"><label>Cedar policy</label><textarea class="input cedar" id="cedar" spellcheck="false"></textarea></div>
+      <div class="field"><label>Business explanation</label><input class="input" id="explanation" /></div>
+      <div id="validation" class="status">No draft validated yet.</div>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label>Approving actor</label><input class="input" id="actor" value="demo-owner" /></div>
+        <div class="field"><label>Change source</label><input class="input" id="source" value="ai-assisted-ui" /></div>
+      </div>
+      <button class="btn primary" id="apply" disabled>Approve &amp; Apply</button>
+    </section>
+
+    <section class="card">
+      <h2>Effective access resolution</h2>
+      <div class="hint">Resolve the policies that apply to one identity and dataset. This inspects policy metadata only; no business rows are queried.</div>
+      <div class="row">
+        <div class="field"><label>Principal</label><select id="simPrincipal"></select></div>
+        <div class="field"><label>Dataset</label><select id="simTable"></select></div>
+      </div>
+      <button class="btn" id="resolve">Resolve effective policy</button>
+      <div id="identity" class="identity"></div>
+      <div id="effectiveStatus" class="status">Select an identity and dataset.</div>
+      <div id="effectivePolicies" class="policylist"></div>
+    </section>
+  </div>
+
+  <section class="card section">
+    <h2>Control-plane inventory</h2>
+    <div class="hint">The demo uses the same Postgres governance registry for Delta and Iceberg. Table-format metadata stays behind the storage adapter.</div>
+    <div class="tabs">
+      <button class="tab active" data-tab="policies">Policies</button>
+      <button class="tab" data-tab="bindings">Bindings</button>
+      <button class="tab" data-tab="principals">Principals</button>
+      <button class="tab" data-tab="tables">Datasets</button>
+      <button class="tab" data-tab="audit">Audit</button>
+    </div>
+    <div id="inventory"></div>
+  </section>
+  <div class="footer">AI output is untrusted input. Cedar compilation, binding checks, target checks and explicit approval happen before any policy becomes active.</div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let state = null, currentTab = 'policies', validated = false;
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const jsonText = v => JSON.stringify(v ?? {}, null, 2);
+async function api(url, options={}){
+  const res = await fetch(url,{headers:{'Content-Type':'application/json'},...options});
+  const data = await res.json().catch(()=>({message:`HTTP ${res.status}`}));
+  if(!res.ok) throw new Error(data.message || data.code || `HTTP ${res.status}`);
+  return data;
+}
+function draftPayload(){return {
+  policy_key:$('policyKey').value.trim(), binding_id:$('bindingId').value.trim(),
+  target:$('draftTable').value, principal_selector:$('draftSelector').value,
+  cedar:$('cedar').value.trim(), explanation:$('explanation').value.trim()
+}}
+function selectors(){
+  const roles=[...new Set((state?.principals||[]).map(p=>p.role))].sort().map(r=>`role:${r}`);
+  const principals=(state?.principals||[]).map(p=>`principal:${p.principal_key}`);
+  return ['*',...roles,...principals];
+}
+function fillSelect(el, values, label){
+  const prior=el.value; el.innerHTML=values.map(v=>`<option value="${esc(v.value??v)}">${esc(v.label??v)}</option>`).join('');
+  if([...el.options].some(o=>o.value===prior)) el.value=prior;
+  if(!el.options.length) el.innerHTML=`<option value="">No ${esc(label)}</option>`;
+}
+async function refresh(){
+  state=await api('/api/state');
+  $('kPrincipals').textContent=state.counts.principals; $('kPolicies').textContent=state.counts.policies;
+  $('kBindings').textContent=state.counts.bindings; $('kTables').textContent=state.counts.tables;
+  $('aiBadge').textContent=state.ai_configured?'AI configured':'AI optional / not configured';
+  $('aiBadge').className='badge '+(state.ai_configured?'good':'');
+  const tables=state.tables.filter(t=>t.enabled&&t.source_enabled).map(t=>({value:t.table_key,label:`${t.table_key} · ${t.kind}`}));
+  fillSelect($('draftTable'),tables,'datasets'); fillSelect($('simTable'),tables,'datasets');
+  fillSelect($('simPrincipal'),state.principals.map(p=>({value:p.principal_key,label:`${p.principal_key} · ${p.role}`})),'principals');
+  fillSelect($('draftSelector'),selectors(),'selectors');
+  renderInventory();
+}
+function table(headers, rows){return `<div class="tablewrap"><table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.join('')||`<tr><td colspan="${headers.length}" class="muted">No records</td></tr>`}</tbody></table></div>`}
+function renderInventory(){
+  if(!state)return; let html='';
+  if(currentTab==='policies') html=table(['Policy','Enabled','Updated','Cedar'],state.policies.map(p=>`<tr><td><strong>${esc(p.policy_key)}</strong></td><td><span class="${p.enabled?'okdot':'offdot'}"></span>${p.enabled?'Enabled':'Disabled'}</td><td>${esc(p.updated_at)}</td><td class="mono">${esc(p.cedar)}</td></tr>`));
+  if(currentTab==='bindings') html=table(['Binding','Policy','Target','Selector','Precedence','Enabled'],state.bindings.map(b=>`<tr><td>${esc(b.binding_id)}</td><td>${esc(b.policy_key)}</td><td>${esc(b.target)}</td><td><code>${esc(b.principal_selector)}</code></td><td>${b.precedence}</td><td>${b.enabled?'Yes':'No'}</td></tr>`));
+  if(currentTab==='principals') html=table(['Principal','Role','Display name','Attributes'],state.principals.map(p=>`<tr><td><strong>${esc(p.principal_key)}</strong></td><td>${esc(p.role)}</td><td>${esc(p.display_name||'')}</td><td class="mono">${esc(jsonText(p.attributes))}</td></tr>`));
+  if(currentTab==='tables') html=table(['Dataset','Format adapter','Source','Logical name','Location / identity','Enabled'],state.tables.map(t=>`<tr><td><strong>${esc(t.table_key)}</strong></td><td>${esc(t.kind)}</td><td>${esc(t.source_key)}</td><td>${esc(t.logical_name)}</td><td class="mono">${esc(t.kind==='iceberg_sql'?jsonText(t.table_config):t.location)}</td><td>${t.enabled&&t.source_enabled?'Yes':'No'}</td></tr>`));
+  if(currentTab==='audit') html=table(['Time','Entity','Action','Actor','Source','After'],state.audit.map(a=>`<tr><td>${esc(a.created_at)}</td><td>${esc(a.entity_type)}<br><strong>${esc(a.entity_key)}</strong></td><td>${esc(a.action)}</td><td>${esc(a.actor)}</td><td>${esc(a.source)}</td><td class="mono">${esc(jsonText(a.after_state))}</td></tr>`));
+  $('inventory').innerHTML=html;
+}
+function showValidation(v, message='Deterministic validation passed.'){
+  validated=true; $('apply').disabled=false;
+  $('validation').className='status good';
+  $('validation').innerHTML=`<strong>${esc(message)}</strong><div class="meta"><span class="tag">${esc(v.filter_type)}</span><span class="tag">${esc(v.effect)}</span>${(v.required_attributes||[]).map(a=>`<span class="tag">principal.${esc(a)}</span>`).join('')}</div>`;
+}
+function invalidate(message){validated=false;$('apply').disabled=true;$('validation').className='status bad';$('validation').textContent=message;}
+for(const btn of document.querySelectorAll('.chip')) btn.onclick=()=>{$('rule').value=btn.dataset.rule;};
+for(const btn of document.querySelectorAll('.tab')) btn.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));btn.classList.add('active');currentTab=btn.dataset.tab;renderInventory();};
+['policyKey','bindingId','cedar','explanation','draftTable','draftSelector'].forEach(id=>$(id).addEventListener('input',()=>{validated=false;$('apply').disabled=true;}));
+$('aiDraft').onclick=async()=>{
+  try{
+    $('aiDraft').disabled=true;$('validation').className='status warn';$('validation').textContent='AI is drafting; output will be validated before it is shown as usable…';
+    const data=await api('/api/policy/ai-draft',{method:'POST',body:JSON.stringify({rule:$('rule').value,table_key:$('draftTable').value,principal_selector:$('draftSelector').value})});
+    $('policyKey').value=data.draft.policy_key;$('bindingId').value=data.draft.binding_id;$('cedar').value=data.draft.cedar;$('explanation').value=data.draft.explanation;
+    showValidation(data.validation,'AI draft passed deterministic validation. Human approval is still required.');
+  }catch(e){invalidate(e.message)}finally{$('aiDraft').disabled=false}
+};
+$('validate').onclick=async()=>{try{const data=await api('/api/policy/validate',{method:'POST',body:JSON.stringify(draftPayload())});showValidation(data.validation)}catch(e){invalidate(e.message)}};
+$('apply').onclick=async()=>{
+  if(!validated)return;
+  if(!confirm(`Apply policy ${$('policyKey').value} and binding ${$('bindingId').value}?`))return;
+  try{
+    $('apply').disabled=true;const data=await api('/api/policy/apply',{method:'POST',body:JSON.stringify({actor:$('actor').value,source:$('source').value,draft:draftPayload()})});
+    $('validation').className='status good';$('validation').textContent=data.message;await refresh();
+  }catch(e){invalidate(e.message)}finally{validated=false;$('apply').disabled=true}
+};
+$('resolve').onclick=async()=>{
+  $('effectivePolicies').innerHTML='';$('identity').innerHTML='';
+  try{
+    const q=new URLSearchParams({principal:$('simPrincipal').value,table:$('simTable').value});const data=await api('/api/effective?'+q);
+    $('identity').innerHTML=Object.entries(data.attributes||{}).map(([k,v])=>`<span class="tag">${esc(k)}=${esc(v)}</span>`).join('');
+    $('effectiveStatus').className='status good';$('effectiveStatus').innerHTML=`Resolved <strong>${data.policies.length}</strong> effective policies for <strong>${esc(data.principal)}</strong> on <strong>${esc(data.table.key)}</strong>. ${(data.required_attributes||[]).length?'Required identity attributes are present.':'No dynamic identity attributes required.'}`;
+    $('effectivePolicies').innerHTML=data.policies.map(p=>`<div class="policy"><div class="head"><div class="pid">${esc(p.id)}</div><div class="small">${esc(p.filter_type)} · ${esc(p.effect)}</div></div>${p.column?`<div class="small">Column: ${esc(p.column)}</div>`:''}<div class="small">${esc(p.cel_expression)}</div></div>`).join('');
+  }catch(e){$('effectiveStatus').className='status bad';$('effectiveStatus').textContent=e.message}
+};
+refresh().catch(e=>{document.body.classList.remove('loading');invalidate('Failed to load control plane: '+e.message)});
+</script>
+</body>
+</html>

@@ -53,10 +53,26 @@ services:
     environment:
       <<: *storage-environment
       DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+      ICEBERG_CATALOG_DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
     depends_on:
       postgres: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
     # No default identity, table or SQL. The caller must supply all three.
+
+  governance-ui:
+    image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
+    entrypoint: ["governance-ui"]
+    environment:
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+      GOVERNANCE_UI_ADDR: 0.0.0.0:8088
+      # Optional. The endpoint must implement the OpenAI-compatible
+      # chat-completions request/response shape. AI drafts are untrusted input.
+      AI_CHAT_URL: ${AI_CHAT_URL:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+    ports: ["127.0.0.1:8088:8088"]
+    depends_on:
+      postgres: {condition: service_healthy}
 
   fixture-loader:
     image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
@@ -74,6 +90,7 @@ services:
     environment:
       <<: *storage-environment
       DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+      ICEBERG_CATALOG_DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
       ICEBERG_CATALOG_NAME: sme
       ICEBERG_WAREHOUSE: s3://lake/iceberg
     volumes: ["./fixtures:/fixtures:ro"]
