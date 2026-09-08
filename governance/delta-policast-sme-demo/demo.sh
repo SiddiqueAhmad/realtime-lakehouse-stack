@@ -4,7 +4,7 @@ set -euo pipefail
 docker compose up -d postgres minio
 docker compose run --rm minio-init
 
-docker compose build governed-query
+docker compose build --pull governed-query
 
 for principal in admin physician analyst; do
   echo
