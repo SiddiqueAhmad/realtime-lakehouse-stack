@@ -14,7 +14,7 @@ The Policast revision is pinned to `c6891d553fa1105546668c75b9a0d175bc54f70d`, w
 ## Run everything
 
 ```bash
-./demo.sh
+bash demo.sh
 ```
 
 Or manually:
