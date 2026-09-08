@@ -11,6 +11,14 @@ Purpose: prove a lightweight SME governance path with no Spark, OPA, Trino, or U
 
 The Policast revision is pinned to `c6891d553fa1105546668c75b9a0d175bc54f70d`, whose workspace currently pins DataFusion 53.1 and deltalake 0.32.4.
 
+### Policy resolution in this POC
+
+Policast's DataFusion enforcement layer applies the policies present in the resolved manifest; it does not itself decide whether a role-scoped policy should be included. The full Policast resolver normally performs principal/binding selection before returning that manifest.
+
+Because this POC intentionally skips the resolver sidecar, the Rust demo performs a minimal in-process resolve step after compiling Cedar from Postgres: policies with `@roles(...)` are kept only for matching roles, while unscoped policies (such as the sensitive-column masks and legal-hold deny rule) remain global.
+
+This is sufficient for the POC. A production control plane should model policy bindings explicitly (role/group/principal + resource) rather than treating this mini-resolver as the final policy-store design.
+
 ## Run everything
 
 ```bash
@@ -65,6 +73,12 @@ Postgres:
 | analyst | only `us-east` rows | masked | masked |
 
 `patient 1005` is on legal hold and should be filtered for all three demo roles.
+
+Expected policy-resolution counts with the shipped five policies:
+
+- `admin`: 5 compiled, 3 resolved
+- `physician`: 5 compiled, 4 resolved
+- `analyst`: 5 compiled, 4 resolved
 
 ## Change a policy without rebuilding the Rust image
 
