@@ -10,6 +10,7 @@ use datafusion::{
     prelude::SessionContext,
 };
 use deltalake::{
+    ensure_table_uri,
     kernel::engine::arrow_conversion::TryIntoKernel,
     operations::{create::CreateBuilder, write::WriteBuilder},
     DeltaTableBuilder,
@@ -41,8 +42,10 @@ async fn main() -> Result<()> {
 
     ensure_demo_delta(&table_uri, &storage_options).await?;
 
+    // deltalake 0.32.4 accepts a parsed Url for remote table operations.
+    let table_url = ensure_table_uri(&table_uri).context("normalize Delta table URI")?;
     let table = deltalake::open_table_with_storage_options(
-        table_uri.clone(),
+        table_url,
         storage_options.clone(),
     )
     .await
@@ -62,9 +65,11 @@ async fn main() -> Result<()> {
         name: principal.display_name.clone(),
     };
 
+    // Policast currently returns Box<dyn Error> without Send + Sync here,
+    // so anyhow::Context cannot be attached directly. Convert it explicitly.
     let governed = wrap_delta_table(table, manifest, "patients", identity)
         .await
-        .context("wrap Delta TableProvider with Policast governance")?;
+        .map_err(|e| anyhow::anyhow!("wrap Delta TableProvider with Policast governance: {e}"))?;
 
     ctx.register_table("patients", Arc::new(governed))?;
 
@@ -141,7 +146,12 @@ async fn load_manifest(pool: &sqlx::PgPool) -> Result<PolicyManifest> {
 }
 
 async fn ensure_demo_delta(uri: &str, storage: &HashMap<String, String>) -> Result<()> {
-    let builder = DeltaTableBuilder::from_uri(uri).with_storage_options(storage.clone());
+    // deltalake 0.32.4 removed DeltaTableBuilder::from_uri. Normalize the
+    // user-facing string first, then construct the builder from the Url.
+    let table_url = ensure_table_uri(uri).context("normalize Delta table URI")?;
+    let builder = DeltaTableBuilder::from_url(table_url)?
+        .with_storage_options(storage.clone());
+
     let exists = builder
         .build()?
         .verify_deltatable_existence()
