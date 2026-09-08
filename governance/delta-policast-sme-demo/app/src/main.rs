@@ -15,7 +15,7 @@ use deltalake::{
     operations::{create::CreateBuilder, write::WriteBuilder},
     DeltaTableBuilder,
 };
-use policast_core::{parse_policies, PolicyManifest};
+use policast_core::{model::CompiledPolicy, parse_policies, PolicyManifest};
 use policast_datafusion::{cel_filter::QueryIdentity, delta::wrap_delta_table};
 use sqlx::{postgres::PgPoolOptions, Row};
 
@@ -38,18 +38,15 @@ async fn main() -> Result<()> {
         .context("connect to governance Postgres")?;
 
     let principal = load_principal(&pool, &principal_key).await?;
-    let manifest = load_manifest(&pool).await?;
+    let manifest = load_manifest(&pool, &principal_key, &principal.role).await?;
 
     ensure_demo_delta(&table_uri, &storage_options).await?;
 
     // deltalake 0.32.4 accepts a parsed Url for remote table operations.
     let table_url = ensure_table_uri(&table_uri).context("normalize Delta table URI")?;
-    let table = deltalake::open_table_with_storage_options(
-        table_url,
-        storage_options.clone(),
-    )
-    .await
-    .context("open Delta table from MinIO")?;
+    let table = deltalake::open_table_with_storage_options(table_url, storage_options.clone())
+        .await
+        .context("open Delta table from MinIO")?;
 
     let ctx = SessionContext::new();
 
@@ -120,7 +117,18 @@ async fn load_principal(pool: &sqlx::PgPool, key: &str) -> Result<Principal> {
     })
 }
 
-async fn load_manifest(pool: &sqlx::PgPool) -> Result<PolicyManifest> {
+/// Minimal in-process resolver for this POC.
+///
+/// Policast's production resolver filters policy bindings for the request
+/// principal before DataFusion sees the manifest. Because this demo stores
+/// Cedar source directly in Postgres and intentionally skips the sidecar, we
+/// reproduce that principal-scoping step here using the compiler's
+/// `CompiledPolicy.applies_to` metadata (populated by `@roles(...)`).
+async fn load_manifest(
+    pool: &sqlx::PgPool,
+    principal_key: &str,
+    role: &str,
+) -> Result<PolicyManifest> {
     let rows = sqlx::query(
         "SELECT policy_key, cedar \
          FROM governance.policies WHERE enabled ORDER BY policy_key",
@@ -141,16 +149,49 @@ async fn load_manifest(pool: &sqlx::PgPool) -> Result<PolicyManifest> {
             .with_context(|| format!("compile Cedar policy {key} to Policast manifest"))?;
     }
 
-    println!("Loaded and compiled {} policies from Postgres", manifest.policies.len());
+    let compiled_count = manifest.policies.len();
+    manifest
+        .policies
+        .retain(|policy| policy_applies_to_principal(policy, principal_key, role));
+    let resolved_count = manifest.policies.len();
+
+    // The compiler derived this footprint before principal-scoped policies
+    // were removed. GovernedTable does not consume it, so clear it rather than
+    // advertising requirements from policies that are not in this bundle.
+    manifest.principal_contract = None;
+
+    println!(
+        "Loaded and compiled {compiled_count} policies from Postgres; resolved {resolved_count} for principal={principal_key} role={role}"
+    );
+
     Ok(manifest)
+}
+
+fn policy_applies_to_principal(
+    policy: &CompiledPolicy,
+    principal_key: &str,
+    role: &str,
+) -> bool {
+    let Some(scope) = &policy.applies_to else {
+        return true;
+    };
+
+    if scope.roles.is_empty() && scope.principals.is_empty() {
+        return true;
+    }
+
+    scope.roles.iter().any(|candidate| candidate == role)
+        || scope
+            .principals
+            .iter()
+            .any(|candidate| candidate == principal_key)
 }
 
 async fn ensure_demo_delta(uri: &str, storage: &HashMap<String, String>) -> Result<()> {
     // deltalake 0.32.4 removed DeltaTableBuilder::from_uri. Normalize the
     // user-facing string first, then construct the builder from the Url.
     let table_url = ensure_table_uri(uri).context("normalize Delta table URI")?;
-    let builder = DeltaTableBuilder::from_url(table_url)?
-        .with_storage_options(storage.clone());
+    let builder = DeltaTableBuilder::from_url(table_url)?.with_storage_options(storage.clone());
 
     let exists = builder
         .build()?
@@ -177,27 +218,47 @@ async fn ensure_demo_delta(uri: &str, storage: &HashMap<String, String>) -> Resu
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(vec!["1001", "1002", "1003", "1004", "1005", "1006"])),
             Arc::new(StringArray::from(vec![
-                "Alice Johnson", "Bob Martinez", "Carol White",
-                "David Kim", "Eva Chen", "Frank Brown",
+                "1001", "1002", "1003", "1004", "1005", "1006",
             ])),
             Arc::new(StringArray::from(vec![
-                "123-45-6789", "234-56-7890", "345-67-8901",
-                "456-78-9012", "567-89-0123", "678-90-1234",
+                "Alice Johnson",
+                "Bob Martinez",
+                "Carol White",
+                "David Kim",
+                "Eva Chen",
+                "Frank Brown",
             ])),
             Arc::new(StringArray::from(vec![
-                "Hypertension", "Diabetes Type 2", "Asthma",
-                "Migraine", "Anemia", "Arthritis",
+                "123-45-6789",
+                "234-56-7890",
+                "345-67-8901",
+                "456-78-9012",
+                "567-89-0123",
+                "678-90-1234",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "Hypertension",
+                "Diabetes Type 2",
+                "Asthma",
+                "Migraine",
+                "Anemia",
+                "Arthritis",
             ])),
             Arc::new(StringArray::from(vec![
                 "us-east", "us-west", "us-east", "eu-west", "us-west", "us-east",
             ])),
             Arc::new(StringArray::from(vec![
-                "Dr. Smith", "Dr. Lee", "Dr. Smith",
-                "Dr. Mueller", "Dr. Lee", "Dr. Patel",
+                "Dr. Smith",
+                "Dr. Lee",
+                "Dr. Smith",
+                "Dr. Mueller",
+                "Dr. Lee",
+                "Dr. Patel",
             ])),
-            Arc::new(BooleanArray::from(vec![false, false, false, false, true, false])),
+            Arc::new(BooleanArray::from(vec![
+                false, false, false, false, true, false,
+            ])),
         ],
     )?;
 
