@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-docker compose up -d postgres minio
-docker compose run --rm minio-init
-
-docker compose build --pull governed-query
-
+cd "$(dirname "${BASH_SOURCE[0]}")"
+bash seed-demo.sh
 for principal in admin physician analyst; do
-  echo
-  echo "============================================================"
-  echo " Running governed query as: $principal"
-  echo "============================================================"
-  docker compose run --rm governed-query "$principal"
+  echo "===== Healthcare fixture: $principal ====="
+  docker compose -f docker-compose.yml run --rm governed-query "$principal" \
+    --table patients --sql "$(cat fixtures/healthcare/query.sql)"
 done
+echo '===== Trading fixture: same binary, different schema and policies ====='
+docker compose -f docker-compose.yml run --rm governed-query finance_reader \
+  --table invoices --sql "$(cat fixtures/trading/query.sql)"
