@@ -1,0 +1,20 @@
+{
+  "location": "s3://lake/patients",
+  "fields": [
+    {"name":"patient_id","type":"string"},
+    {"name":"name","type":"string"},
+    {"name":"ssn","type":"string"},
+    {"name":"diagnosis","type":"string"},
+    {"name":"region","type":"string"},
+    {"name":"treating_physician","type":"string"},
+    {"name":"legal_hold","type":"bool"}
+  ],
+  "rows": [
+    {"patient_id":"1001","name":"Alice Johnson","ssn":"123-45-6789","diagnosis":"Hypertension","region":"us-east","treating_physician":"Dr. Smith","legal_hold":false},
+    {"patient_id":"1002","name":"Bob Martinez","ssn":"234-56-7890","diagnosis":"Diabetes Type 2","region":"us-west","treating_physician":"Dr. Lee","legal_hold":false},
+    {"patient_id":"1003","name":"Carol White","ssn":"345-67-8901","diagnosis":"Asthma","region":"us-east","treating_physician":"Dr. Smith","legal_hold":false},
+    {"patient_id":"1004","name":"David Kim","ssn":"456-78-9012","diagnosis":"Migraine","region":"eu-west","treating_physician":"Dr. Mueller","legal_hold":false},
+    {"patient_id":"1005","name":"Eva Chen","ssn":"567-89-0123","diagnosis":"Anemia","region":"us-west","treating_physician":"Dr. Lee","legal_hold":true},
+    {"patient_id":"1006","name":"Frank Brown","ssn":"678-90-1234","diagnosis":"Arthritis","region":"us-east","treating_physician":"Dr. Patel","legal_hold":false}
+  ]
+}

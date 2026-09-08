@@ -1,0 +1,17 @@
+{
+  "location": "s3://lake/invoices",
+  "fields": [
+    {"name":"invoice_id","type":"string"},
+    {"name":"company_id","type":"string"},
+    {"name":"branch","type":"string"},
+    {"name":"amount_minor","type":"int64"},
+    {"name":"status","type":"string"},
+    {"name":"bank_account","type":"string"}
+  ],
+  "rows": [
+    {"invoice_id":"INV-001","company_id":"c-01","branch":"lahore","amount_minor":120000,"status":"OPEN","bank_account":"TEST-001"},
+    {"invoice_id":"INV-002","company_id":"c-01","branch":"karachi","amount_minor":200000,"status":"OPEN","bank_account":"TEST-002"},
+    {"invoice_id":"INV-003","company_id":"c-02","branch":"lahore","amount_minor":350000,"status":"OPEN","bank_account":"TEST-003"},
+    {"invoice_id":"INV-004","company_id":"c-01","branch":"lahore","amount_minor":90000,"status":"CLOSED","bank_account":"TEST-004"}
+  ]
+}

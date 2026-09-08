@@ -1,0 +1,72 @@
+x-storage-environment: &storage-environment
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin123
+  AWS_REGION: us-east-1
+  AWS_ALLOW_HTTP: "true"
+  AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+  # Single-writer development only. Not a production commit-safety setting.
+  AWS_S3_ALLOW_UNSAFE_RENAME: "true"
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: governance
+      POSTGRES_USER: governance
+      POSTGRES_PASSWORD: governance
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U governance -d governance"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - mc alias set local http://minio:9000 minioadmin minioadmin123; mc mb --ignore-existing local/lake
+
+  governed-query:
+    image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
+    build: {context: ./app}
+    environment:
+      <<: *storage-environment
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+    depends_on:
+      postgres: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+    # No default identity, table or SQL. The caller must supply all three.
+
+  fixture-loader:
+    image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
+    entrypoint: ["seed-fixture"]
+    profiles: ["fixtures"]
+    environment: *storage-environment
+    volumes: ["./fixtures:/fixtures:ro"]
+    depends_on:
+      minio-init: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:
+  minio-data:
