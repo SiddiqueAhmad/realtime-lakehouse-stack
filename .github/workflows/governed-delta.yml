@@ -22,7 +22,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 80
     env:
       GOVERNED_QUERY_IMAGE: delta-policast-sme-demo-governed-query
     defaults:
@@ -79,6 +79,42 @@ jobs:
           set -o pipefail
           docker compose up -d --wait postgres
           bash test-migration.sh 2>&1 | tee ci-evidence/migrations.log
+      - name: Governance control-plane UI smoke test
+        id: ui
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          bash migrate.sh
+          docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U governance -d governance < fixtures/healthcare/governance.sql
+          docker compose up -d governance-ui
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8088/api/health > ci-evidence/ui-health.json; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8088/ > ci-evidence/ui.html
+          curl --fail --silent http://127.0.0.1:8088/api/state > ci-evidence/ui-state.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          state=json.loads(Path('ci-evidence/ui-state.json').read_text())
+          assert state['counts']['principals'] >= 3
+          assert state['counts']['policies'] >= 1
+          assert state['counts']['tables'] >= 1
+          html=Path('ci-evidence/ui.html').read_text()
+          assert 'AI drafts' in html and 'Human approves' in html and 'Control-plane only' in html
+          PY
+          curl --fail --silent --get \
+            --data-urlencode principal=analyst --data-urlencode table=patients \
+            http://127.0.0.1:8088/api/effective > ci-evidence/ui-effective.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result=json.loads(Path('ci-evidence/ui-effective.json').read_text())
+          assert result['principal'] == 'analyst'
+          assert result['table']['key'] == 'patients'
+          assert len(result['policies']) >= 1
+          assert 'rows' not in result
+          PY
       - name: Resource evidence and summary
         if: always()
         run: |
@@ -87,13 +123,14 @@ jobs:
             'for file in memory.max memory.swap.max memory.peak memory.events; do echo "== $file =="; cat "/sys/fs/cgroup/$file"; done' \
             > ci-evidence/build-memory.txt 2>&1 || true
           {
-            echo '## Governed Delta + Iceberg v3: ${{ matrix.arch }}'
+            echo '## Governed Delta + Iceberg v3 + control plane UI: ${{ matrix.arch }}'
             echo 'Native build; BuildKit memory limit 4 GiB, swap disabled; Cargo jobs=1.'
             echo 'The same governance assertions run against both table formats.'
             echo 'Build/Rust: ${{ steps.build.outcome }}'
             echo 'Delta E2E: ${{ steps.delta.outcome }}'
             echo 'Iceberg v3 E2E: ${{ steps.iceberg.outcome }}'
             echo 'Migration checks: ${{ steps.migration.outcome }}'
+            echo 'Governance UI smoke: ${{ steps.ui.outcome }}'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Dependency logs
         if: failure()

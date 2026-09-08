@@ -28,5 +28,16 @@ class LayoutTests(unittest.TestCase):
             for row in fixture['rows']:
                 self.assertEqual(set(names), set(row))
 
+    def test_governance_ui_is_control_plane_only(self):
+        ui = (ROOT / 'app/src/bin/governance-ui.rs').read_text()
+        for forbidden in ('SessionContext', 'deltalake', 'iceberg_datafusion', 'query_runtime', 'open_table_with_storage_options'):
+            self.assertNotIn(forbidden, ui, f'governance UI introduced a data-query path via {forbidden}')
+        self.assertIn('parse_policies', ui)
+        self.assertIn('policy_bindings', ui)
+        html = (ROOT / 'app/ui/index.html').read_text()
+        self.assertIn('AI drafts', html)
+        self.assertIn('Human approves', html)
+        self.assertIn('Control-plane only', html)
+
 if __name__ == '__main__':
     unittest.main()

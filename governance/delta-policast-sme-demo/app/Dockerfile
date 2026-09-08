@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo test $LOCKED --all-targets -- --test-threads=1; \
     cargo build $LOCKED --bins; \
     mkdir -p /out; \
-    cp target/debug/governed-delta-demo target/debug/seed-fixture target/debug/seed-iceberg-fixture /out/
+    cp target/debug/governed-delta-demo target/debug/seed-fixture target/debug/seed-iceberg-fixture target/debug/governance-ui /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update \
