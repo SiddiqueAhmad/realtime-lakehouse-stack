@@ -67,6 +67,20 @@ services:
     depends_on:
       minio-init: {condition: service_completed_successfully}
 
+  iceberg-fixture-loader:
+    image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
+    entrypoint: ["seed-iceberg-fixture"]
+    profiles: ["fixtures"]
+    environment:
+      <<: *storage-environment
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+      ICEBERG_CATALOG_NAME: sme
+      ICEBERG_WAREHOUSE: s3://lake/iceberg
+    volumes: ["./fixtures:/fixtures:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+
 volumes:
   pgdata:
   minio-data:

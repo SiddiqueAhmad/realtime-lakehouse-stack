@@ -1,4 +1,4 @@
-name: Governed Delta reference
+name: Governed Delta + Iceberg references
 on:
   pull_request:
     paths:
@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: governed-delta-${{ github.event.pull_request.number || github.ref }}
+  group: governed-lakehouse-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   governance:
@@ -22,7 +22,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       GOVERNED_QUERY_IMAGE: delta-policast-sme-demo-governed-query
     defaults:
@@ -48,7 +48,7 @@ jobs:
             | tee ci-evidence/build-limits.txt
           test "$(docker inspect buildx_buildkit_governed-lowmem0 --format '{{.HostConfig.Memory}}')" = 4294967296
           test "$(docker inspect buildx_buildkit_governed-lowmem0 --format '{{.HostConfig.MemorySwap}}')" = 4294967296
-      - name: Build both binaries and run all Rust tests
+      - name: Build all binaries and run all Rust tests
         id: build
         run: |
           set -o pipefail
@@ -62,11 +62,16 @@ jobs:
           docker cp "$container:/usr/share/governed-query/Cargo.lock" ci-evidence/Cargo.lock
           docker image inspect "$GOVERNED_QUERY_IMAGE" --format '{{.Id}} {{.Architecture}}' \
             | tee ci-evidence/image.txt
-      - name: Generic governance integration tests
-        id: integration
+      - name: Delta governance integration tests
+        id: delta
         run: |
           set -o pipefail
-          SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/governance.log
+          TABLE_FORMAT=delta SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/delta-governance.log
+      - name: Iceberg v3 governance integration tests
+        id: iceberg
+        run: |
+          set -o pipefail
+          TABLE_FORMAT=iceberg SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/iceberg-governance.log
       - name: Migration preservation tests
         id: migration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -82,11 +87,12 @@ jobs:
             'for file in memory.max memory.swap.max memory.peak memory.events; do echo "== $file =="; cat "/sys/fs/cgroup/$file"; done' \
             > ci-evidence/build-memory.txt 2>&1 || true
           {
-            echo '## Governed Delta: ${{ matrix.arch }}'
+            echo '## Governed Delta + Iceberg v3: ${{ matrix.arch }}'
             echo 'Native build; BuildKit memory limit 4 GiB, swap disabled; Cargo jobs=1.'
-            echo 'All Rust targets tested, followed by the actual container E2E suite.'
+            echo 'The same governance assertions run against both table formats.'
             echo 'Build/Rust: ${{ steps.build.outcome }}'
-            echo 'Governance E2E: ${{ steps.integration.outcome }}'
+            echo 'Delta E2E: ${{ steps.delta.outcome }}'
+            echo 'Iceberg v3 E2E: ${{ steps.iceberg.outcome }}'
             echo 'Migration checks: ${{ steps.migration.outcome }}'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Dependency logs

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 use policast_core::{model::{Effect, FilterType}, parse_policies, PolicyManifest};
+use serde_json::Value;
 use sqlx::{PgConnection, Row};
 use crate::{control_plane::{binding_selectors, build_principal_attributes}, principal_lookup};
 
@@ -13,11 +14,14 @@ pub struct RegisteredTable {
     pub key: String,
     pub logical_name: String,
     pub location: String,
+    pub kind: String,
+    pub source_config: Value,
+    pub table_config: Value,
 }
 
 pub async fn require_schema(db: &mut PgConnection) -> Result<()> {
     let ready: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM governance.schema_migrations WHERE version='002_table_registry')"
+        "SELECT EXISTS (SELECT 1 FROM governance.schema_migrations WHERE version='003_source_configs')"
     ).fetch_one(db).await.context("SCHEMA_MIGRATION_REQUIRED: run bash migrate.sh before querying")?;
     if !ready { bail!("SCHEMA_MIGRATION_REQUIRED: run bash migrate.sh before querying"); }
     Ok(())
@@ -37,16 +41,29 @@ pub async fn load_principal(db: &mut PgConnection, key: &str) -> Result<Principa
 
 pub async fn load_table(db: &mut PgConnection, key: &str) -> Result<RegisteredTable> {
     let row = sqlx::query(
-        "SELECT t.table_key, t.logical_name, t.location, s.kind \
+        "SELECT t.table_key, t.logical_name, t.location, t.config::text AS table_config_json, \
+                s.kind, s.config::text AS source_config_json \
          FROM governance.tables t JOIN governance.data_sources s ON s.source_key=t.source_key \
          WHERE t.table_key=$1 AND t.enabled AND s.enabled"
     ).bind(key).fetch_optional(db).await.context("load registered table")?
         .with_context(|| format!("ACCESS_DENIED: unknown or disabled table {key:?}"))?;
-    let kind: String = row.try_get("kind")?;
-    if kind != "delta" { bail!("UNSUPPORTED_SOURCE: {kind:?}; this build implements Delta only"); }
     let logical_name: String = row.try_get("logical_name")?;
     validate_logical_name(&logical_name)?;
-    Ok(RegisteredTable { key: row.try_get("table_key")?, logical_name, location: row.try_get("location")? })
+    let source_config_json: String = row.try_get("source_config_json")?;
+    let table_config_json: String = row.try_get("table_config_json")?;
+    let source_config: Value = serde_json::from_str(&source_config_json).context("parse data source config JSON")?;
+    let table_config: Value = serde_json::from_str(&table_config_json).context("parse table config JSON")?;
+    if !source_config.is_object() || !table_config.is_object() {
+        bail!("REGISTRY_INVALID: source/table config must be JSON objects");
+    }
+    Ok(RegisteredTable {
+        key: row.try_get("table_key")?,
+        logical_name,
+        location: row.try_get("location")?,
+        kind: row.try_get("kind")?,
+        source_config,
+        table_config,
+    })
 }
 
 pub fn validate_logical_name(name: &str) -> Result<()> {

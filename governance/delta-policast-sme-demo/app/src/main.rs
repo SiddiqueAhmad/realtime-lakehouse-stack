@@ -1,12 +1,13 @@
 mod catalog;
 mod cli;
 mod control_plane;
+mod iceberg_adapter;
 mod principal_lookup;
 mod query_runtime;
 mod storage;
 
 use std::sync::Arc;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use datafusion::{arrow::util::pretty::print_batches, datasource::TableProvider, prelude::SessionContext};
 use policast_datafusion::AttrIdentity;
 use sqlx::postgres::PgPoolOptions;
@@ -15,12 +16,13 @@ use sqlx::postgres::PgPoolOptions;
 async fn main() -> Result<()> {
     let args = cli::Args::parse(std::env::args().skip(1).collect())?;
     query_runtime::validate_sql(&args.sql)?;
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
     let pool = PgPoolOptions::new().max_connections(2)
-        .connect(&std::env::var("DATABASE_URL").context("DATABASE_URL is required")?)
+        .connect(&database_url)
         .await.context("connect to governance Postgres")?;
 
     // One consistent control-plane snapshot for this invocation. Nothing is
-    // created, seeded or migrated by the query process.
+    // seeded or migrated by the query process.
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx).await?;
@@ -37,15 +39,27 @@ async fn main() -> Result<()> {
 
     deltalake::aws::register_handlers(None);
     let ctx = SessionContext::new();
-    let options = storage::s3_options();
+    let delta_options = storage::s3_options();
+    let iceberg_database_url = std::env::var("ICEBERG_CATALOG_DATABASE_URL")
+        .unwrap_or_else(|_| database_url.clone());
+
     for (registration, manifest) in registrations {
-        // Delta is the only implemented adapter. Unsupported kinds are errors,
-        // never silently treated as raw Parquet or an ungoverned provider.
-        let table = deltalake::open_table_with_storage_options(
-            deltalake::ensure_table_uri(&registration.location)?, options.clone(),
-        ).await.with_context(|| format!("open registered Delta table {:?}; seed/import it separately", registration.key))?;
-        table.update_datafusion_session(&ctx.state())?;
-        let provider: Arc<dyn TableProvider> = Arc::new(table.table_provider().build().await?);
+        let provider: Arc<dyn TableProvider> = match registration.kind.as_str() {
+            "delta" => {
+                let table = deltalake::open_table_with_storage_options(
+                    deltalake::ensure_table_uri(&registration.location)?, delta_options.clone(),
+                ).await.with_context(|| format!("open registered Delta table {:?}; seed/import it separately", registration.key))?;
+                table.update_datafusion_session(&ctx.state())?;
+                Arc::new(table.table_provider().build().await?)
+            }
+            "iceberg_sql" => iceberg_adapter::open_v3_provider(
+                &iceberg_database_url,
+                &registration.source_config,
+                &registration.table_config,
+            ).await.with_context(|| format!("open registered Iceberg v3 table {:?}", registration.key))?,
+            other => bail!("UNSUPPORTED_SOURCE: {other:?}; supported adapters are delta and iceberg_sql"),
+        };
+
         let governed = query_runtime::ReadBoundary::new(
             provider, manifest, &registration.logical_name,
             AttrIdentity(principal.attributes.clone()),
@@ -53,8 +67,8 @@ async fn main() -> Result<()> {
         ctx.register_table(registration.logical_name.as_str(), Arc::new(governed))?;
     }
 
-    // The session contains only the explicitly requested, governed registry
-    // entries. SQL cannot supply storage locations or register new sources.
+    // The session contains only explicitly requested, governed registry entries.
+    // SQL cannot supply storage locations or register new sources.
     let batches = query_runtime::query(&ctx, &args.sql).await?;
     if args.json {
         let mut writer = datafusion::arrow::json::ArrayWriter::new(Vec::new());
