@@ -31,6 +31,8 @@ docker compose run --rm governed-query analyst
 
 The Docker builder is pinned to `rust:1.98.0-bookworm`. This is intentionally newer than the minimum required by the current AWS SDK transitive dependencies pulled by delta-rs S3 support.
 
+For this functional POC the container uses a **debug Cargo build** rather than `--release`, and Docker BuildKit caches the Cargo registry, git dependencies, and target directory. This keeps the edit/compile cycle much shorter while we stabilize the integration. Switch to a release build after the demo is passing end to end.
+
 MinIO console: http://localhost:9001
 
 - user: `minioadmin`
