@@ -4,15 +4,15 @@ WORKDIR /app
 COPY . .
 
 # Functional demo: use a debug build for faster iteration. Persist Cargo
-# registry/git/target caches across Docker rebuilds. If Cargo.lock has been
-# generated and committed, enforce it automatically with --locked.
+# registry/git/target caches across Docker rebuilds. Run Rust unit tests before
+# producing the binary, and enforce Cargo.lock automatically once committed.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     if [ -f Cargo.lock ]; then \
-        cargo build --locked; \
+        cargo test --locked && cargo build --locked; \
     else \
-        cargo build; \
+        cargo test && cargo build; \
     fi \
     && cp /app/target/debug/governed-delta-demo /app/governed-delta-demo
 
