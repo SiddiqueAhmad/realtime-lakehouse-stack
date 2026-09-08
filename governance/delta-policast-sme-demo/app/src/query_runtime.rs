@@ -6,7 +6,7 @@ use datafusion::{
     catalog::Session,
     common::{DataFusionError, DFSchema, Result as DFResult},
     datasource::TableProvider,
-    logical_expr::{Expr, TableProviderFilterPushDown, TableType},
+    logical_expr::{expr_fn::cast, Expr, TableProviderFilterPushDown, TableType},
     physical_expr::expressions::Column,
     physical_plan::{ExecutionPlan, PhysicalExpr, projection::ProjectionExec},
     prelude::{SessionContext, SQLOptions},
@@ -56,7 +56,7 @@ impl ReadBoundary {
             if p.filter_type == FilterType::ColumnMask {
                 let name = p.column.as_deref().ok_or_else(|| invalid("mask has no column"))?;
                 let field = schema.field_with_name(name).map_err(|e| invalid(&e.to_string()))?;
-                if !matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View) {
+                if !is_string(field.data_type()) {
                     return Err(invalid("this Policast version supports string masking only"));
                 }
                 continue;
@@ -91,6 +91,54 @@ fn invalid(message: &str) -> DataFusionError {
     DataFusionError::Plan(format!("POLICY_INVALID: {message}"))
 }
 
+fn is_string(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
+}
+
+/// Reconcile the physical string layout AFTER masking, without accessing the
+/// raw provider. The pinned Policast mask emits Utf8 literals even when the
+/// provider advertises Utf8View/LargeUtf8. Downstream expressions are planned
+/// against the advertised schema, so simply returning that plan causes an
+/// Arrow Utf8/Utf8View comparison error. Convert only between string layouts;
+/// unexpected non-string type/name/arity changes are hard errors.
+fn align_governed_strings(
+    state: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    declared: &SchemaRef,
+) -> DFResult<Arc<dyn ExecutionPlan>> {
+    let actual = plan.schema();
+    if actual.fields().len() != declared.fields().len() {
+        return Err(invalid("governed output changed the number of columns"));
+    }
+    let mut needs_cast = false;
+    for (source, target) in actual.fields().iter().zip(declared.fields()) {
+        if source.name() != target.name() {
+            return Err(invalid("governed output changed column names/order"));
+        }
+        if source.data_type() != target.data_type() {
+            if !is_string(source.data_type()) || !is_string(target.data_type()) {
+                return Err(invalid("unexpected non-string governed output type change"));
+            }
+            needs_cast = true;
+        }
+    }
+    if !needs_cast { return Ok(plan); }
+
+    let df_schema = DFSchema::try_from(actual.as_ref().clone())?;
+    let mut expressions: Vec<(Arc<dyn PhysicalExpr>, String)> = Vec::new();
+    for (index, (source, target)) in actual.fields().iter().zip(declared.fields()).enumerate() {
+        let expression: Arc<dyn PhysicalExpr> = if source.data_type() == target.data_type() {
+            Arc::new(Column::new(source.name(), index))
+        } else {
+            // Use an unqualified column object, not SQL parsing of the name.
+            let column = Expr::Column(datafusion::common::Column::new_unqualified(source.name()));
+            state.create_physical_expr(cast(column, target.data_type().clone()), &df_schema)?
+        };
+        expressions.push((expression, target.name().clone()));
+    }
+    Ok(Arc::new(ProjectionExec::try_new(expressions, plan)?))
+}
+
 #[async_trait]
 impl TableProvider for ReadBoundary {
     fn as_any(&self) -> &dyn Any { self }
@@ -102,6 +150,7 @@ impl TableProvider for ReadBoundary {
     async fn scan(&self, state: &dyn Session, projection: Option<&Vec<usize>>, _filters: &[Expr], _limit: Option<usize>) -> DFResult<Arc<dyn ExecutionPlan>> {
         self.preflight(state)?;
         let plan = self.governed.scan(state, None, &[], None).await?;
+        let plan = align_governed_strings(state, plan, &self.schema())?;
         let Some(indices) = projection else { return Ok(plan); };
         let schema = plan.schema();
         let mut expressions: Vec<(Arc<dyn PhysicalExpr>, String)> = Vec::new();
@@ -116,16 +165,20 @@ impl TableProvider for ReadBoundary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::{arrow::{array::{Int64Array, StringArray}, datatypes::{Field, Schema}}, datasource::MemTable};
+    use datafusion::{arrow::{array::{ArrayRef, Int64Array, StringArray}, compute::cast as arrow_cast, datatypes::{Field, Schema}}, datasource::MemTable};
     use policast_core::parse_policies;
 
-    fn session() -> SessionContext {
+    fn session() -> SessionContext { session_with_string_type(DataType::Utf8) }
+
+    fn session_with_string_type(string_type: DataType) -> SessionContext {
+        let tenant: ArrayRef = Arc::new(StringArray::from(vec!["other", "one", "one"]));
+        let secret: ArrayRef = Arc::new(StringArray::from(vec!["x", "sensitive", "z"]));
         let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false), Field::new("tenant", DataType::Utf8, false),
-            Field::new("secret", DataType::Utf8, false),
+            Field::new("id", DataType::Int64, false), Field::new("tenant", string_type.clone(), false),
+            Field::new("secret", string_type.clone(), false),
         ])), vec![Arc::new(Int64Array::from(vec![1,2,3])),
-            Arc::new(StringArray::from(vec!["other", "one", "one"])),
-            Arc::new(StringArray::from(vec!["x", "sensitive", "z"]))]).unwrap();
+            arrow_cast(tenant.as_ref(), &string_type).unwrap(),
+            arrow_cast(secret.as_ref(), &string_type).unwrap()]).unwrap();
         let source = MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap();
         let cedar = r#"
 @id("tenant") @target_table("records") @filter_type("row_filter")
@@ -178,5 +231,35 @@ forbid(principal,action,resource) when { principal.role == "reader" };
     #[tokio::test]
     async fn unregistered_table_fails() {
         assert!(query(&session(), "SELECT * FROM other_table").await.is_err());
+    }
+    #[tokio::test]
+    async fn utf8_view_mask_preserves_declared_output_type() {
+        let b = query(&session_with_string_type(DataType::Utf8View), "SELECT secret FROM records ORDER BY id").await.unwrap();
+        assert_eq!(b.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        for batch in b {
+            assert_eq!(batch.column(0).data_type(), &DataType::Utf8View);
+            let strings = arrow_cast(batch.column(0).as_ref(), &DataType::Utf8).unwrap();
+            let strings = strings.as_any().downcast_ref::<StringArray>().unwrap();
+            assert!(strings.iter().all(|value| value == Some("***")));
+        }
+    }
+    #[tokio::test]
+    async fn utf8_view_predicates_see_masks_not_raw_values() {
+        let ctx = session_with_string_type(DataType::Utf8View);
+        let raw = query(&ctx, "SELECT id FROM records WHERE secret='sensitive'").await.unwrap();
+        assert_eq!(raw.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        let masked = query(&ctx, "SELECT id FROM records WHERE secret='***'").await.unwrap();
+        assert_eq!(masked.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+    }
+    #[tokio::test]
+    async fn large_utf8_mask_preserves_type_and_predicate_semantics() {
+        let ctx = session_with_string_type(DataType::LargeUtf8);
+        let masked = query(&ctx, "SELECT secret FROM records WHERE secret='***'").await.unwrap();
+        assert_eq!(masked.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        for batch in masked {
+            assert_eq!(batch.column(0).data_type(), &DataType::LargeUtf8);
+        }
+        let raw = query(&ctx, "SELECT id FROM records WHERE secret='sensitive'").await.unwrap();
+        assert_eq!(raw.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
     }
 }

@@ -7,26 +7,101 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: governed-delta-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   governance:
-    runs-on: ubuntu-latest
+    name: governance (${{ matrix.arch }}, 4GiB build)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      GOVERNED_QUERY_IMAGE: delta-policast-sme-demo-governed-query
     defaults:
       run:
         working-directory: governance/delta-policast-sme-demo
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Architecture and fixture checks
-        run: python3 -m unittest discover -s tests -p 'test_layout.py' -v
-      - name: Build both binaries and run Rust tests
-        run: docker compose build governed-query
+        run: |
+          python3 -m unittest discover -s tests -p 'test_layout.py' -v
+          python3 -m py_compile tests/test_governance.py
+          for script in *.sh; do bash -n "$script"; done
+      - name: Configure memory-limited native builder
+        run: |
+          mkdir -p ci-evidence
+          uname -m | tee ci-evidence/architecture.txt
+          git rev-parse HEAD | tee ci-evidence/tested-commit.txt
+          docker buildx create --name governed-lowmem --driver docker-container \
+            --driver-opt memory=4g --driver-opt memory-swap=4g --use --bootstrap
+          docker inspect buildx_buildkit_governed-lowmem0 \
+            --format 'memory={{.HostConfig.Memory}} memory_swap={{.HostConfig.MemorySwap}}' \
+            | tee ci-evidence/build-limits.txt
+          test "$(docker inspect buildx_buildkit_governed-lowmem0 --format '{{.HostConfig.Memory}}')" = 4294967296
+          test "$(docker inspect buildx_buildkit_governed-lowmem0 --format '{{.HostConfig.MemorySwap}}')" = 4294967296
+      - name: Build both binaries and run all Rust tests
+        id: build
+        run: |
+          set -o pipefail
+          docker buildx build --builder governed-lowmem --progress plain --load \
+            --build-arg CARGO_BUILD_JOBS=1 --tag "$GOVERNED_QUERY_IMAGE" ./app \
+            2>&1 | tee ci-evidence/build.log
+      - name: Retain exact built lockfile
+        run: |
+          container=$(docker create --entrypoint /bin/true "$GOVERNED_QUERY_IMAGE")
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker cp "$container:/usr/share/governed-query/Cargo.lock" ci-evidence/Cargo.lock
+          docker image inspect "$GOVERNED_QUERY_IMAGE" --format '{{.Id}} {{.Architecture}}' \
+            | tee ci-evidence/image.txt
       - name: Generic governance integration tests
-        run: SKIP_BUILD=1 bash test-governance.sh
+        id: integration
+        run: |
+          set -o pipefail
+          SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/governance.log
       - name: Migration preservation tests
-        run: bash test-migration.sh
+        id: migration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          docker compose up -d --wait postgres
+          bash test-migration.sh 2>&1 | tee ci-evidence/migrations.log
+      - name: Resource evidence and summary
+        if: always()
+        run: |
+          mkdir -p ci-evidence
+          docker exec buildx_buildkit_governed-lowmem0 sh -c \
+            'for file in memory.max memory.swap.max memory.peak memory.events; do echo "== $file =="; cat "/sys/fs/cgroup/$file"; done' \
+            > ci-evidence/build-memory.txt 2>&1 || true
+          {
+            echo '## Governed Delta: ${{ matrix.arch }}'
+            echo 'Native build; BuildKit memory limit 4 GiB, swap disabled; Cargo jobs=1.'
+            echo 'All Rust targets tested, followed by the actual container E2E suite.'
+            echo 'Build/Rust: ${{ steps.build.outcome }}'
+            echo 'Governance E2E: ${{ steps.integration.outcome }}'
+            echo 'Migration checks: ${{ steps.migration.outcome }}'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Dependency logs
         if: failure()
         run: docker compose logs --no-color
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-evidence-${{ matrix.arch }}
+          path: governance/delta-policast-sme-demo/ci-evidence/
+          retention-days: 7
+          if-no-files-found: warn
       - name: Stop ephemeral CI stack
         if: always()
-        run: docker compose down
+        run: |
+          docker compose down
+          docker buildx rm governed-lowmem || true
