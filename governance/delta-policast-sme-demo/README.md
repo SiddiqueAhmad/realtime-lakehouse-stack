@@ -33,6 +33,18 @@ The Docker builder is pinned to `rust:1.98.0-bookworm`. This is intentionally ne
 
 For this functional POC the container uses a **debug Cargo build** rather than `--release`, and Docker BuildKit caches the Cargo registry, git dependencies, and target directory. This keeps the edit/compile cycle much shorter while we stabilize the integration. Switch to a release build after the demo is passing end to end.
 
+### PostgreSQL 18 volume layout
+
+PostgreSQL 18+ expects the persistent volume to be mounted at `/var/lib/postgresql`; it creates a major-version-specific data directory beneath that path. If you previously started this demo with the old `/var/lib/postgresql/data` mount, remove the old demo volume once before restarting:
+
+```bash
+docker compose down -v --remove-orphans
+docker compose up -d postgres minio
+docker compose logs -f postgres
+```
+
+This is safe for this disposable demo, but do not use `down -v` against a production database whose data you need to preserve.
+
 MinIO console: http://localhost:9001
 
 - user: `minioadmin`
