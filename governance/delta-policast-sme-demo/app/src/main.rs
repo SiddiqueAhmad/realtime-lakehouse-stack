@@ -1,12 +1,16 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use datafusion::{
     arrow::{
         array::{BooleanArray, StringArray},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
+    datasource::TableProvider,
     prelude::SessionContext,
 };
 use deltalake::{
@@ -15,9 +19,11 @@ use deltalake::{
     operations::{create::CreateBuilder, write::WriteBuilder},
     DeltaTableBuilder,
 };
-use policast_core::{model::CompiledPolicy, parse_policies, PolicyManifest};
-use policast_datafusion::{cel_filter::QueryIdentity, delta::wrap_delta_table};
+use policast_core::{parse_policies, PolicyManifest};
+use policast_datafusion::{AttrIdentity, GovernedTable};
 use sqlx::{postgres::PgPoolOptions, Row};
+
+const TABLE_NAME: &str = "patients";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,12 +43,27 @@ async fn main() -> Result<()> {
         .await
         .context("connect to governance Postgres")?;
 
+    // Unknown principals fail here, before policy resolution or Delta access.
     let principal = load_principal(&pool, &principal_key).await?;
-    let manifest = load_manifest(&pool, &principal_key, &principal.role).await?;
+
+    // Resolve policy assignment from explicit Postgres bindings. Cedar source
+    // no longer contains role assignment metadata.
+    let manifest = load_resolved_manifest(
+        &pool,
+        &principal_key,
+        &principal.role,
+        TABLE_NAME,
+    )
+    .await?;
+
+    // Dynamic identities are only safe if every principal attribute required
+    // by the resolved policies is present. Policast's row-filter path can skip
+    // an expression when an identity field is missing, so enforce the manifest
+    // contract here and fail closed before any table is registered.
+    validate_principal_contract(&manifest, &principal_key, &principal.attributes)?;
 
     ensure_demo_delta(&table_uri, &storage_options).await?;
 
-    // deltalake 0.32.4 accepts a parsed Url for remote table operations.
     let table_url = ensure_table_uri(&table_uri).context("normalize Delta table URI")?;
     let table = deltalake::open_table_with_storage_options(table_url, storage_options.clone())
         .await
@@ -50,31 +71,30 @@ async fn main() -> Result<()> {
 
     let ctx = SessionContext::new();
 
-    // delta-rs 0.32 requires the table's object store to be registered with
-    // the DataFusion session before the physical scan executes.
     table
         .update_datafusion_session(&ctx.state())
         .context("register Delta object store in DataFusion")?;
 
-    let identity = QueryIdentity {
-        role: principal.role.clone(),
-        region: principal.region.clone(),
-        name: principal.display_name.clone(),
-    };
+    // Build the generic Delta TableProvider and wrap it directly with
+    // GovernedTable so we can use AttrIdentity instead of the fixed
+    // role/region/name QueryIdentity convenience type.
+    let provider: Arc<dyn TableProvider> = Arc::new(
+        table
+            .table_provider()
+            .build()
+            .await
+            .context("build Delta DataFusion TableProvider")?,
+    );
 
-    // Policast currently returns Box<dyn Error> without Send + Sync here,
-    // so anyhow::Context cannot be attached directly. Convert it explicitly.
-    let governed = wrap_delta_table(table, manifest, "patients", identity)
-        .await
-        .map_err(|e| anyhow::anyhow!("wrap Delta TableProvider with Policast governance: {e}"))?;
+    let identity = AttrIdentity(principal.attributes.clone());
+    let governed = GovernedTable::new(provider, manifest, TABLE_NAME, identity);
 
-    ctx.register_table("patients", Arc::new(governed))?;
+    ctx.register_table(TABLE_NAME, Arc::new(governed))?;
 
     println!("\n=== Principal ===");
-    println!("key:    {}", principal_key);
-    println!("role:   {}", principal.role);
-    println!("region: {:?}", principal.region);
-    println!("name:   {:?}", principal.display_name);
+    println!("key:        {}", principal_key);
+    println!("role:       {}", principal.role);
+    println!("attributes: {:?}", principal.attributes);
 
     println!("\n=== Governed result ===");
     ctx.sql(
@@ -85,58 +105,108 @@ async fn main() -> Result<()> {
     .show()
     .await?;
 
-    println!("\nExpected:");
-    println!("  admin     -> all non-legal-hold rows, SSN/diagnosis visible");
-    println!("  physician -> only Dr. Smith rows, SSN/diagnosis visible");
-    println!("  analyst   -> only us-east rows, SSN/diagnosis masked");
-
     Ok(())
 }
 
 #[derive(Debug)]
 struct Principal {
     role: String,
-    region: Option<String>,
-    display_name: Option<String>,
+    attributes: BTreeMap<String, String>,
 }
 
 async fn load_principal(pool: &sqlx::PgPool, key: &str) -> Result<Principal> {
     let row = sqlx::query(
-        "SELECT role, region, display_name \
+        "SELECT role, display_name, attributes::text AS attributes_json \
          FROM governance.principals WHERE principal_key = $1",
     )
     .bind(key)
     .fetch_one(pool)
     .await
-    .with_context(|| format!("load principal {key:?} from Postgres"))?;
+    .with_context(|| format!("ACCESS_DENIED: unknown principal {key:?}"))?;
 
-    Ok(Principal {
-        role: row.try_get("role")?,
-        region: row.try_get("region")?,
-        display_name: row.try_get("display_name")?,
-    })
+    let role: String = row.try_get("role")?;
+    let display_name: Option<String> = row.try_get("display_name")?;
+    let attributes_json: String = row.try_get("attributes_json")?;
+
+    let value: serde_json::Value = serde_json::from_str(&attributes_json)
+        .with_context(|| format!("parse attributes JSON for principal {key:?}"))?;
+    let object = value
+        .as_object()
+        .with_context(|| format!("principal {key:?} attributes must be a JSON object"))?;
+
+    let mut attributes = BTreeMap::new();
+    for (attr_key, attr_value) in object {
+        let Some(value) = attr_value.as_str() else {
+            bail!(
+                "principal {key:?} attribute {attr_key:?} must be a string; current Policast principal attributes are string-valued"
+            );
+        };
+        attributes.insert(attr_key.clone(), value.to_string());
+    }
+
+    // Reserved identity fields are authoritative and overwrite any same-named
+    // key in JSONB so business-managed attributes cannot spoof identity.
+    attributes.insert("role".to_string(), role.clone());
+    attributes.insert("principal_id".to_string(), key.to_string());
+    if let Some(name) = display_name {
+        attributes.insert("name".to_string(), name);
+    }
+
+    Ok(Principal { role, attributes })
 }
 
-/// Minimal in-process resolver for this POC.
+/// Resolve policy assignment from Postgres.
 ///
-/// Policast's production resolver filters policy bindings for the request
-/// principal before DataFusion sees the manifest. Because this demo stores
-/// Cedar source directly in Postgres and intentionally skips the sidecar, we
-/// reproduce that principal-scoping step here using the compiler's
-/// `CompiledPolicy.applies_to` metadata (populated by `@roles(...)`).
-async fn load_manifest(
+/// Binding selectors supported by this POC mirror Policast's resolver shape:
+///   * `*`
+///   * `role:<role>`
+///   * `principal:<principal_key>`
+///
+/// Only the resolved policy set is compiled and handed to DataFusion.
+async fn load_resolved_manifest(
     pool: &sqlx::PgPool,
     principal_key: &str,
     role: &str,
+    table_name: &str,
 ) -> Result<PolicyManifest> {
-    let rows = sqlx::query(
-        "SELECT policy_key, cedar \
-         FROM governance.policies WHERE enabled ORDER BY policy_key",
+    let total_enabled: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM governance.policies WHERE enabled",
     )
+    .fetch_one(pool)
+    .await
+    .context("count enabled governance policies")?;
+
+    let role_selector = format!("role:{role}");
+    let principal_selector = format!("principal:{principal_key}");
+
+    let rows = sqlx::query(
+        "SELECT p.policy_key, p.cedar \
+         FROM governance.policies p \
+         WHERE p.enabled \
+           AND EXISTS ( \
+               SELECT 1 \
+               FROM governance.policy_bindings b \
+               WHERE b.enabled \
+                 AND b.policy_key = p.policy_key \
+                 AND (b.target = '*' OR b.target = $1) \
+                 AND b.principal_selector IN ('*', $2, $3) \
+           ) \
+         ORDER BY p.policy_key",
+    )
+    .bind(table_name)
+    .bind(&role_selector)
+    .bind(&principal_selector)
     .fetch_all(pool)
     .await
-    .context("load Cedar policies from Postgres")?;
+    .context("resolve policy bindings from Postgres")?;
 
+    if rows.is_empty() {
+        bail!(
+            "ACCESS_DENIED: no governance policies resolved for principal={principal_key} role={role} table={table_name}"
+        );
+    }
+
+    let resolved_count = rows.len();
     let mut manifest = PolicyManifest::new();
 
     for row in rows {
@@ -149,47 +219,40 @@ async fn load_manifest(
             .with_context(|| format!("compile Cedar policy {key} to Policast manifest"))?;
     }
 
-    let compiled_count = manifest.policies.len();
-    manifest
-        .policies
-        .retain(|policy| policy_applies_to_principal(policy, principal_key, role));
-    let resolved_count = manifest.policies.len();
-
-    // The compiler derived this footprint before principal-scoped policies
-    // were removed. GovernedTable does not consume it, so clear it rather than
-    // advertising requirements from policies that are not in this bundle.
-    manifest.principal_contract = None;
-
     println!(
-        "Loaded and compiled {compiled_count} policies from Postgres; resolved {resolved_count} for principal={principal_key} role={role}"
+        "Loaded {total_enabled} enabled policies from Postgres; resolved and compiled {resolved_count} for principal={principal_key} role={role} table={table_name}"
     );
 
     Ok(manifest)
 }
 
-fn policy_applies_to_principal(
-    policy: &CompiledPolicy,
+fn validate_principal_contract(
+    manifest: &PolicyManifest,
     principal_key: &str,
-    role: &str,
-) -> bool {
-    let Some(scope) = &policy.applies_to else {
-        return true;
+    attributes: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(contract) = &manifest.principal_contract else {
+        return Ok(());
     };
 
-    if scope.roles.is_empty() && scope.principals.is_empty() {
-        return true;
+    let missing: Vec<&str> = contract
+        .required_attributes
+        .iter()
+        .map(String::as_str)
+        .filter(|attr| !attributes.contains_key(*attr))
+        .collect();
+
+    if !missing.is_empty() {
+        bail!(
+            "ACCESS_DENIED: principal {principal_key:?} is missing attributes required by resolved policies: {}",
+            missing.join(", ")
+        );
     }
 
-    scope.roles.iter().any(|candidate| candidate == role)
-        || scope
-            .principals
-            .iter()
-            .any(|candidate| candidate == principal_key)
+    Ok(())
 }
 
 async fn ensure_demo_delta(uri: &str, storage: &HashMap<String, String>) -> Result<()> {
-    // deltalake 0.32.4 removed DeltaTableBuilder::from_uri. Normalize the
-    // user-facing string first, then construct the builder from the Url.
     let table_url = ensure_table_uri(uri).context("normalize Delta table URI")?;
     let builder = DeltaTableBuilder::from_url(table_url)?.with_storage_options(storage.clone());
 
