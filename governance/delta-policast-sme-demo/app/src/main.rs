@@ -1,4 +1,5 @@
 mod control_plane;
+mod principal_lookup;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -120,14 +121,14 @@ struct Principal {
 }
 
 async fn load_principal(pool: &sqlx::PgPool, key: &str) -> Result<Principal> {
-    let row = sqlx::query(
+    let lookup = sqlx::query(
         "SELECT role, display_name, attributes::text AS attributes_json \
          FROM governance.principals WHERE principal_key = $1",
     )
     .bind(key)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("ACCESS_DENIED: unknown principal {key:?}"))?;
+    .fetch_optional(pool)
+    .await;
+    let row = principal_lookup::require_principal(key, lookup)?;
 
     let role: String = row.try_get("role")?;
     let display_name: Option<String> = row.try_get("display_name")?;
