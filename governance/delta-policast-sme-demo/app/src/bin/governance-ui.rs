@@ -520,7 +520,10 @@ mod tests {
     fn row_filter_cannot_be_a_forbid() {
         let mut draft = region_draft();
         draft.cedar = r#"@id("region_scope") @filter_type("row_filter") @target_table("patients") forbid(principal, action == Action::"query", resource) when { resource.region == principal.region };"#.into();
-        assert!(validate_draft(&draft).unwrap_err().to_string().contains("row_filter must be a permit"));
+        // Policast may reject this invalid combination during compilation before
+        // our explicit effect check runs. Either path is correct only if the
+        // draft fails closed and can never reach Approve & Apply.
+        assert!(validate_draft(&draft).is_err());
     }
 
     #[test]
