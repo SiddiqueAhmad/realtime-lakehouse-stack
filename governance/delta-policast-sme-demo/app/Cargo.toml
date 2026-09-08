@@ -15,3 +15,14 @@ datafusion = "=53.1.0"
 deltalake = { version = "=0.32.4", features = ["datafusion", "s3"] }
 policast-core = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-core" }
 policast-datafusion = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-datafusion", features = ["delta"] }
+
+# Full DWARF for DataFusion/Arrow/Cedar makes test links very memory hungry.
+# Keep debug assertions and overflow checks; only omit debugger information
+# and incremental compiler state. These are functional, not benchmark builds.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
