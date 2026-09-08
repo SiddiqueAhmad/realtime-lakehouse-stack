@@ -1,9 +1,14 @@
+mod control_plane;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
+use control_plane::{
+    binding_selectors, build_principal_attributes, validate_principal_contract,
+};
 use datafusion::{
     arrow::{
         array::{BooleanArray, StringArray},
@@ -47,7 +52,7 @@ async fn main() -> Result<()> {
     let principal = load_principal(&pool, &principal_key).await?;
 
     // Resolve policy assignment from explicit Postgres bindings. Cedar source
-    // no longer contains role assignment metadata.
+    // contains business logic only; assignment is a control-plane concern.
     let manifest = load_resolved_manifest(
         &pool,
         &principal_key,
@@ -56,10 +61,9 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // Dynamic identities are only safe if every principal attribute required
-    // by the resolved policies is present. Policast's row-filter path can skip
-    // an expression when an identity field is missing, so enforce the manifest
-    // contract here and fail closed before any table is registered.
+    // Policast derives which principal.* attributes the resolved policy set
+    // needs. Validate them before Delta is opened/registered so a missing
+    // dynamic attribute fails closed instead of weakening a row filter.
     validate_principal_contract(&manifest, &principal_key, &principal.attributes)?;
 
     ensure_demo_delta(&table_uri, &storage_options).await?;
@@ -76,8 +80,9 @@ async fn main() -> Result<()> {
         .context("register Delta object store in DataFusion")?;
 
     // Build the generic Delta TableProvider and wrap it directly with
-    // GovernedTable so we can use AttrIdentity instead of the fixed
-    // role/region/name QueryIdentity convenience type.
+    // GovernedTable so we can use AttrIdentity rather than a fixed identity
+    // struct. Any string attribute in principal.attributes can be referenced
+    // by Cedar as principal.<attribute> with no Rust field change.
     let provider: Arc<dyn TableProvider> = Arc::new(
         table
             .table_provider()
@@ -128,29 +133,12 @@ async fn load_principal(pool: &sqlx::PgPool, key: &str) -> Result<Principal> {
     let display_name: Option<String> = row.try_get("display_name")?;
     let attributes_json: String = row.try_get("attributes_json")?;
 
-    let value: serde_json::Value = serde_json::from_str(&attributes_json)
-        .with_context(|| format!("parse attributes JSON for principal {key:?}"))?;
-    let object = value
-        .as_object()
-        .with_context(|| format!("principal {key:?} attributes must be a JSON object"))?;
-
-    let mut attributes = BTreeMap::new();
-    for (attr_key, attr_value) in object {
-        let Some(value) = attr_value.as_str() else {
-            bail!(
-                "principal {key:?} attribute {attr_key:?} must be a string; current Policast principal attributes are string-valued"
-            );
-        };
-        attributes.insert(attr_key.clone(), value.to_string());
-    }
-
-    // Reserved identity fields are authoritative and overwrite any same-named
-    // key in JSONB so business-managed attributes cannot spoof identity.
-    attributes.insert("role".to_string(), role.clone());
-    attributes.insert("principal_id".to_string(), key.to_string());
-    if let Some(name) = display_name {
-        attributes.insert("name".to_string(), name);
-    }
+    let attributes = build_principal_attributes(
+        key,
+        &role,
+        display_name.as_deref(),
+        &attributes_json,
+    )?;
 
     Ok(Principal { role, attributes })
 }
@@ -176,8 +164,7 @@ async fn load_resolved_manifest(
     .await
     .context("count enabled governance policies")?;
 
-    let role_selector = format!("role:{role}");
-    let principal_selector = format!("principal:{principal_key}");
+    let (role_selector, principal_selector) = binding_selectors(principal_key, role);
 
     let rows = sqlx::query(
         "SELECT p.policy_key, p.cedar \
@@ -224,32 +211,6 @@ async fn load_resolved_manifest(
     );
 
     Ok(manifest)
-}
-
-fn validate_principal_contract(
-    manifest: &PolicyManifest,
-    principal_key: &str,
-    attributes: &BTreeMap<String, String>,
-) -> Result<()> {
-    let Some(contract) = &manifest.principal_contract else {
-        return Ok(());
-    };
-
-    let missing: Vec<&str> = contract
-        .required_attributes
-        .iter()
-        .map(String::as_str)
-        .filter(|attr| !attributes.contains_key(*attr))
-        .collect();
-
-    if !missing.is_empty() {
-        bail!(
-            "ACCESS_DENIED: principal {principal_key:?} is missing attributes required by resolved policies: {}",
-            missing.join(", ")
-        );
-    }
-
-    Ok(())
 }
 
 async fn ensure_demo_delta(uri: &str, storage: &HashMap<String, String>) -> Result<()> {
