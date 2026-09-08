@@ -6,7 +6,7 @@ Purpose: prove a lightweight SME governance path with no Spark, OPA, Trino, or U
 
 - **Postgres 18**: principals + Cedar policy source (control plane)
 - **MinIO**: Delta Lake table files and `_delta_log` (data plane)
-- **Rust demo**: delta-rs 0.32.4 + DataFusion 53.1 + Policast
+- **Rust demo**: Rust 1.98 + delta-rs 0.32.4 + DataFusion 53.1 + Policast
 - **Policast**: row filters, column masks, deny override
 
 The Policast revision is pinned to `c6891d553fa1105546668c75b9a0d175bc54f70d`, whose workspace currently pins DataFusion 53.1 and deltalake 0.32.4.
@@ -22,12 +22,14 @@ Or manually:
 ```bash
 docker compose up -d postgres minio
 docker compose run --rm minio-init
-docker compose build governed-query
+docker compose build --pull governed-query
 
 docker compose run --rm governed-query admin
 docker compose run --rm governed-query physician
 docker compose run --rm governed-query analyst
 ```
+
+The Docker builder is pinned to `rust:1.98.0-bookworm`. This is intentionally newer than the minimum required by the current AWS SDK transitive dependencies pulled by delta-rs S3 support.
 
 MinIO console: http://localhost:9001
 
@@ -62,6 +64,10 @@ docker compose run --rm governed-query analyst
 ```
 
 Or edit the Cedar stored in `governance.policies`, then rerun the query container. Policies are fetched and compiled at runtime.
+
+## Build reproducibility
+
+This proof-of-concept currently does not commit the app `Cargo.lock`. After the first successful local build, commit `app/Cargo.lock` and switch the Docker build to `cargo build --release --locked` so future transitive dependency upgrades cannot unexpectedly change the required Rust version or behavior.
 
 ## Important demo limitation
 
