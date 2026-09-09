@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Black-box tests: real binary, scratch Postgres DB and isolated Delta paths."""
+"""Black-box governance tests against either Delta or Iceberg v3."""
 from __future__ import annotations
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "-f", str(ROOT / "docker-compose.yml")]
+TABLE_FORMAT = os.environ.get("TABLE_FORMAT", "delta").lower()
+if TABLE_FORMAT not in {"delta", "iceberg"}:
+    raise SystemExit("TABLE_FORMAT must be delta or iceberg")
 
 
 def run(args: list[str], text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -23,10 +27,13 @@ def quote(value: str) -> str:
 
 def main() -> None:
     suffix = uuid.uuid4().hex[:12]
-    database = f"governance_e2e_{suffix}"
-    prefix = f"s3://lake/_governance_tests/{suffix}"
+    database = f"governance_e2e_{TABLE_FORMAT}_{suffix}"
+    prefix = f"s3://lake/_governance_tests/{TABLE_FORMAT}/{suffix}"
     created = False
     passed = 0
+    db_url = f"postgresql://governance:governance@postgres:5432/{database}"
+    iceberg_catalog = f"e2e_{suffix}"
+    iceberg_warehouse = f"{prefix}/warehouse"
 
     def pg(sql: str, db: str = database) -> str:
         return run(["exec", "-T", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "governance", "-d", db, "-At"], sql).stdout
@@ -41,8 +48,7 @@ def main() -> None:
         print(f"PASS {passed}: {name}", flush=True)
 
     def invoke(principal: str, sql: str, tables: tuple[str, ...] = ("patients",)) -> subprocess.CompletedProcess[str]:
-        args = ["run", "--rm", "-T", "--no-deps", "-e",
-                f"DATABASE_URL=postgresql://governance:governance@postgres:5432/{database}",
+        args = ["run", "--rm", "-T", "--no-deps", "-e", f"DATABASE_URL={db_url}",
                 "governed-query", principal]
         for key in tables:
             args += ["--table", key]
@@ -78,6 +84,27 @@ def main() -> None:
     def set_policy(source: str) -> None:
         pg(f"UPDATE governance.policies SET cedar={quote(source)} WHERE policy_key='row_filter_region';")
 
+    def configure_and_seed(scenario: str, table: str) -> None:
+        location = f"{prefix}/{table}"
+        if TABLE_FORMAT == "delta":
+            pg(f"UPDATE governance.tables SET location={quote(location)} WHERE table_key={quote(table)};")
+            run(["run", "--rm", "-T", "--no-deps", "fixture-loader",
+                 f"/fixtures/{scenario}/table.json", location])
+            return
+
+        namespace = scenario
+        config = json.dumps({"namespace": namespace, "table": table}, separators=(",", ":"))
+        pg(f"UPDATE governance.tables SET source_key='demo-iceberg', location={quote(location)}, config={quote(config)}::jsonb WHERE table_key={quote(table)};")
+        seeded = run([
+            "run", "--rm", "-T", "--no-deps",
+            "-e", f"DATABASE_URL={db_url}",
+            "-e", f"ICEBERG_CATALOG_NAME={iceberg_catalog}",
+            "-e", f"ICEBERG_WAREHOUSE={iceberg_warehouse}",
+            "iceberg-fixture-loader", f"/fixtures/{scenario}/table.json",
+            namespace, table, location,
+        ])
+        check("format-version=3" in seeded.stdout, f"fixture was not verified as Iceberg v3: {seeded.stdout}")
+
     baseline = policy("resource.region == principal.region")
     try:
         pg(f'CREATE DATABASE "{database}";', "postgres")
@@ -85,10 +112,15 @@ def main() -> None:
         pg((ROOT / "postgres/init.sql").read_text())
         for migration in sorted((ROOT / "postgres/migrations").glob("*.sql")):
             pg(migration.read_text())
-        for scenario, table in [("healthcare", "patients"), ("trading", "invoices")]:
+        for scenario in ["healthcare", "trading"]:
             pg((ROOT / f"fixtures/{scenario}/governance.sql").read_text())
-            pg(f"UPDATE governance.tables SET location={quote(prefix + '/' + table)} WHERE table_key={quote(table)};")
-            run(["run", "--rm", "-T", "--no-deps", "fixture-loader", f"/fixtures/{scenario}/table.json", prefix + "/" + table])
+
+        if TABLE_FORMAT == "iceberg":
+            source_config = json.dumps({"catalog_name": iceberg_catalog, "warehouse": iceberg_warehouse}, separators=(",", ":"))
+            pg(f"INSERT INTO governance.data_sources(source_key,kind,config) VALUES ('demo-iceberg','iceberg_sql',{quote(source_config)}::jsonb) ON CONFLICT (source_key) DO UPDATE SET kind=EXCLUDED.kind, config=EXCLUDED.config, enabled=true;")
+
+        configure_and_seed("healthcare", "patients")
+        configure_and_seed("trading", "invoices")
 
         check(query("admin") == expected(["1001", "1002", "1003", "1004", "1006"]), "admin rows/columns mismatch")
         passed_case("admin exact rows, unmasked values, legal hold excluded")
@@ -163,14 +195,12 @@ def main() -> None:
         passed_case("unregistered/disabled tables are not exposed")
         denied("analyst", "no bound permit row policy", "SELECT * FROM invoices", ("patients", "invoices"))
         passed_case("each requested table must be independently authorized")
-        print(f"PASS: {passed} governance regression cases", flush=True)
+        print(f"PASS: {passed} governance regression cases on {TABLE_FORMAT}", flush=True)
     finally:
         if created:
             # Only the unique scratch database is removed, never governance.
             pg(f'DROP DATABASE "{database}" WITH (FORCE);', "postgres")
-        # Preserve the isolated object prefix for debugging. Never delete or
-        # overwrite the normal patients/invoices tables as part of testing.
-        print(f"Isolated fixture objects retained at {prefix}", flush=True)
+        print(f"Isolated {TABLE_FORMAT} fixture objects retained at {prefix}", flush=True)
 
 
 if __name__ == "__main__":

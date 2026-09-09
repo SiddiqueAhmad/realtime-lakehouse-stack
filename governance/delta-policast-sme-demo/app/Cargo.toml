@@ -13,6 +13,16 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 serde_json = "1"
 datafusion = "=53.1.0"
 deltalake = { version = "=0.32.4", features = ["datafusion", "s3"] }
+
+# Iceberg 0.10.0 is intentionally selected for Reference B: it supports
+# Iceberg format v3 while using DataFusion 53.1.0, exactly matching the
+# Policast/Delta reference. 0.10.1 moved to DataFusion 55 and cannot share
+# TableProvider trait objects with the currently pinned Policast build.
+iceberg = "=0.10.0"
+iceberg-datafusion = "=0.10.0"
+iceberg-catalog-sql = "=0.10.0"
+iceberg-storage-opendal = { version = "=0.10.0", default-features = false, features = ["opendal-s3"] }
+
 policast-core = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-core" }
 policast-datafusion = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-datafusion", features = ["delta"] }
 
