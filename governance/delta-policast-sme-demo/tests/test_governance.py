@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box governance tests against either Delta or Iceberg v3."""
+"""Black-box governance tests against Delta, Iceberg v3, or DuckLake."""
 from __future__ import annotations
 import json
 import os
@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "-f", str(ROOT / "docker-compose.yml")]
 TABLE_FORMAT = os.environ.get("TABLE_FORMAT", "delta").lower()
-if TABLE_FORMAT not in {"delta", "iceberg"}:
-    raise SystemExit("TABLE_FORMAT must be delta or iceberg")
+if TABLE_FORMAT not in {"delta", "iceberg", "ducklake"}:
+    raise SystemExit("TABLE_FORMAT must be delta, iceberg, or ducklake")
 
 
 def run(args: list[str], text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -34,6 +34,8 @@ def main() -> None:
     db_url = f"postgresql://governance:governance@postgres:5432/{database}"
     iceberg_catalog = f"e2e_{suffix}"
     iceberg_warehouse = f"{prefix}/warehouse"
+    ducklake_catalog = f"e2e_{suffix}"
+    ducklake_data_path = f"{prefix}/warehouse"
 
     def pg(sql: str, db: str = database) -> str:
         return run(["exec", "-T", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "governance", "-d", db, "-At"], sql).stdout
@@ -92,18 +94,30 @@ def main() -> None:
                  f"/fixtures/{scenario}/table.json", location])
             return
 
-        namespace = scenario
-        config = json.dumps({"namespace": namespace, "table": table}, separators=(",", ":"))
-        pg(f"UPDATE governance.tables SET source_key='demo-iceberg', location={quote(location)}, config={quote(config)}::jsonb WHERE table_key={quote(table)};")
+        if TABLE_FORMAT == "iceberg":
+            namespace = scenario
+            config = json.dumps({"namespace": namespace, "table": table}, separators=(",", ":"))
+            pg(f"UPDATE governance.tables SET source_key='demo-iceberg', location={quote(location)}, config={quote(config)}::jsonb WHERE table_key={quote(table)};")
+            seeded = run([
+                "run", "--rm", "-T", "--no-deps",
+                "-e", f"DATABASE_URL={db_url}",
+                "-e", f"ICEBERG_CATALOG_NAME={iceberg_catalog}",
+                "-e", f"ICEBERG_WAREHOUSE={iceberg_warehouse}",
+                "iceberg-fixture-loader", f"/fixtures/{scenario}/table.json",
+                namespace, table, location,
+            ])
+            check("format-version=3" in seeded.stdout, f"fixture was not verified as Iceberg v3: {seeded.stdout}")
+            return
+
+        config = json.dumps({"schema": scenario, "table": table}, separators=(",", ":"))
+        pg(f"UPDATE governance.tables SET source_key='demo-ducklake', location={quote(location)}, config={quote(config)}::jsonb WHERE table_key={quote(table)};")
         seeded = run([
             "run", "--rm", "-T", "--no-deps",
             "-e", f"DATABASE_URL={db_url}",
-            "-e", f"ICEBERG_CATALOG_NAME={iceberg_catalog}",
-            "-e", f"ICEBERG_WAREHOUSE={iceberg_warehouse}",
-            "iceberg-fixture-loader", f"/fixtures/{scenario}/table.json",
-            namespace, table, location,
+            "ducklake-fixture-loader", f"/fixtures/{scenario}/table.json",
+            ducklake_catalog, scenario, table, ducklake_data_path,
         ])
-        check("format-version=3" in seeded.stdout, f"fixture was not verified as Iceberg v3: {seeded.stdout}")
+        check("Seeded DuckLake" in seeded.stdout, f"DuckLake fixture load failed: {seeded.stdout}")
 
     baseline = policy("resource.region == principal.region")
     try:
@@ -118,6 +132,9 @@ def main() -> None:
         if TABLE_FORMAT == "iceberg":
             source_config = json.dumps({"catalog_name": iceberg_catalog, "warehouse": iceberg_warehouse}, separators=(",", ":"))
             pg(f"INSERT INTO governance.data_sources(source_key,kind,config) VALUES ('demo-iceberg','iceberg_sql',{quote(source_config)}::jsonb) ON CONFLICT (source_key) DO UPDATE SET kind=EXCLUDED.kind, config=EXCLUDED.config, enabled=true;")
+        elif TABLE_FORMAT == "ducklake":
+            source_config = json.dumps({"catalog_name": ducklake_catalog}, separators=(",", ":"))
+            pg(f"INSERT INTO governance.data_sources(source_key,kind,config) VALUES ('demo-ducklake','ducklake_postgres',{quote(source_config)}::jsonb) ON CONFLICT (source_key) DO UPDATE SET kind=EXCLUDED.kind, config=EXCLUDED.config, enabled=true;")
 
         configure_and_seed("healthcare", "patients")
         configure_and_seed("trading", "invoices")

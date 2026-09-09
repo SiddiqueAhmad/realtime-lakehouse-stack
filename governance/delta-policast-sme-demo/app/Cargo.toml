@@ -23,6 +23,14 @@ iceberg-datafusion = "=0.10.0"
 iceberg-catalog-sql = "=0.10.0"
 iceberg-storage-opendal = { version = "=0.10.0", default-features = false, features = ["opendal-s3"] }
 
+# DuckLake Reference C deliberately uses the newest datafusion-ducklake release
+# on the same DataFusion major as the existing Policast boundary. Releases
+# 0.4+ moved to DataFusion 54; 0.3.0 remains on DataFusion 53. Disable default
+# DuckDB bundling: this reference uses Postgres metadata + MinIO only.
+datafusion-ducklake = { version = "=0.3.0", default-features = false, features = ["write-postgres"] }
+object_store = { version = "=0.13.2", features = ["aws"] }
+url = "2.5"
+
 policast-core = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-core" }
 policast-datafusion = { git = "https://github.com/open-lakehouse/policast.git", rev = "c6891d553fa1105546668c75b9a0d175bc54f70d", package = "policast-datafusion", features = ["delta"] }
 

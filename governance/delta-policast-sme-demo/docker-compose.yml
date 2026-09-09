@@ -81,6 +81,19 @@ services:
       postgres: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
 
+  ducklake-fixture-loader:
+    image: ${GOVERNED_QUERY_IMAGE:-delta-policast-sme-demo-governed-query}
+    entrypoint: ["seed-ducklake-fixture"]
+    profiles: ["fixtures"]
+    environment:
+      <<: *storage-environment
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+      DUCKLAKE_BUCKET: lake
+    volumes: ["./fixtures:/fixtures:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+
 volumes:
   pgdata:
   minio-data:

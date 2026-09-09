@@ -1,4 +1,4 @@
-name: Governed Delta + Iceberg references
+name: Governed Delta + Iceberg + DuckLake references
 on:
   pull_request:
     paths:
@@ -22,7 +22,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       GOVERNED_QUERY_IMAGE: delta-policast-sme-demo-governed-query
     defaults:
@@ -72,6 +72,11 @@ jobs:
         run: |
           set -o pipefail
           TABLE_FORMAT=iceberg SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/iceberg-governance.log
+      - name: DuckLake governance integration tests
+        id: ducklake
+        run: |
+          set -o pipefail
+          TABLE_FORMAT=ducklake SKIP_BUILD=1 bash test-governance.sh 2>&1 | tee ci-evidence/ducklake-governance.log
       - name: Migration preservation tests
         id: migration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -87,12 +92,13 @@ jobs:
             'for file in memory.max memory.swap.max memory.peak memory.events; do echo "== $file =="; cat "/sys/fs/cgroup/$file"; done' \
             > ci-evidence/build-memory.txt 2>&1 || true
           {
-            echo '## Governed Delta + Iceberg v3: ${{ matrix.arch }}'
+            echo '## Governed Delta + Iceberg v3 + DuckLake: ${{ matrix.arch }}'
             echo 'Native build; BuildKit memory limit 4 GiB, swap disabled; Cargo jobs=1.'
-            echo 'The same governance assertions run against both table formats.'
+            echo 'The identical 20-case governance suite runs against all three storage adapters.'
             echo 'Build/Rust: ${{ steps.build.outcome }}'
             echo 'Delta E2E: ${{ steps.delta.outcome }}'
             echo 'Iceberg v3 E2E: ${{ steps.iceberg.outcome }}'
+            echo 'DuckLake E2E: ${{ steps.ducklake.outcome }}'
             echo 'Migration checks: ${{ steps.migration.outcome }}'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Dependency logs
