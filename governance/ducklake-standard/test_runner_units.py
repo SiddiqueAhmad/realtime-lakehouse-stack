@@ -37,4 +37,17 @@ class RunnerChecks(unittest.TestCase):
         self.assertTrue((run.BASE/'tests/test_governance.py').exists())
         self.assertFalse((run.HERE/'test_governance.py').exists())
 
+    def test_red_control_requires_the_actual_bug_not_infrastructure(self):
+        valid=[{'id':'TT-05','status':'FAILED','detail':'expired snapshot accepted and returned []'},
+               {'id':'SCHEMA-08','status':'FAILED','detail':'rowset mismatch: region disappeared'}]
+        run.verify_red_control(valid)
+        for detail in ['connection refused','container crashed','not a retryable conflict']:
+            invalid=[dict(item) for item in valid];invalid[0]['detail']=detail
+            with self.assertRaises(AssertionError):run.verify_red_control(invalid)
+    def test_red_control_cannot_accept_pass_or_missing_case(self):
+        with self.assertRaises(AssertionError):run.verify_red_control([])
+        with self.assertRaises(AssertionError):
+            run.verify_red_control([{'id':'TT-05','status':'PASS','detail':''},
+                                    {'id':'SCHEMA-08','status':'FAILED','detail':'rowset mismatch:'}])
+
 if __name__=='__main__':unittest.main()

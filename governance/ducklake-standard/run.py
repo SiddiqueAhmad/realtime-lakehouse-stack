@@ -90,6 +90,16 @@ def native_expiry_absent(s):
 h.CASES['MAINT-01']=native_expiry_absent
 
 
+def verify_red_control(results):
+    """Do not mistake network/setup failures for reproductions of storage bugs."""
+    expected = {'TT-05': 'expired snapshot accepted and returned',
+                'SCHEMA-08': 'rowset mismatch:'}
+    assert {r['id'] for r in results} == set(expected), 'red control must run exactly both regressions'
+    for result in results:
+        assert result['status'] == 'FAILED', f"unpatched control unexpectedly {result['status']}"
+        assert expected[result['id']] in result['detail'], f"wrong failure in red control: {result['detail']}"
+
+
 def run_lane(output,selected,expect_red=False):
     manifest=json.loads((BASE/'tests/ducklake_qualification_cases.json').read_text())
     if set(h.CASES)!={c['id'] for c in manifest['cases']}:raise RuntimeError('case coverage drift')
@@ -131,8 +141,7 @@ def run_lane(output,selected,expect_red=False):
         print(f'SUMMARY standard-pg: {counts}',flush=True)
         failures={r['id'] for r in results if r['status']=='FAILED'}
         if expect_red:
-            assert {r['id'] for r in results}=={'TT-05','SCHEMA-08'},'red control must run exactly both regression cases'
-            assert failures=={'TT-05','SCHEMA-08'},f'unpatched control did not reproduce both: {failures}'
+            verify_red_control(results)
             return False
         return bool(counts['FAILED'] or counts['BLOCKED'])
     finally:suite.close()

@@ -35,8 +35,7 @@ def stage(root, upstream, policast, patched=True):
     edit('vendor/policast/Cargo.toml', lambda s: replace(replace(s,'"crates/*",','"crates/policast-core", "crates/policast-datafusion",'),'datafusion = "53.1"','datafusion = "=54.1.0"'))
     # This port only exposes the generic TableProvider boundary. Optional Delta/UC
     # adapters retain their DF53 dependencies upstream and are not part of this lane.
-    p=root/'vendor/policast/crates/policast-datafusion/Cargo.toml'
-    p.write_text('''[package]
+    edit('vendor/policast/crates/policast-datafusion/Cargo.toml', lambda _: '''[package]
 name = "policast-datafusion"
 version.workspace = true
 edition.workspace = true
@@ -57,6 +56,11 @@ tempfile = { workspace = true }
 ''')
     edit('vendor/policast/crates/policast-datafusion/src/governance_table.rs', lambda s: replace(replace(s,'    fn as_any(&self) -> &dyn Any {\n        self\n    }\n',''),'        fn as_any(&self) -> &dyn Any {\n            self\n        }\n',''))
     if patched:
+        # PostgreSQL SELECT 1 yields INT4; the upstream Option<i64> decoder
+        # otherwise masks a genuine retryable conflict with a database error.
+        edit('vendor/ducklake/src/metadata_writer_postgres_single.rs', lambda s: replace(s,
+            '"SELECT 1 FROM ducklake_data_file\n',
+            '"SELECT 1::BIGINT FROM ducklake_data_file\n'))
         edit('vendor/ducklake/src/catalog.rs', lambda s: replace(s,
             'pub fn with_snapshot(provider: Arc<dyn MetadataProvider>, snapshot_id: i64) -> Result<Self> {\n',
             'pub fn with_snapshot(provider: Arc<dyn MetadataProvider>, snapshot_id: i64) -> Result<Self> {\n        // Reject unavailable history instead of returning a plausible empty result.\n        crate::metadata_provider::require_snapshot(provider.as_ref(), snapshot_id)?;\n'))

@@ -18,9 +18,9 @@ RUN --mount=type=cache,target=/sources set -eu; \
     python3 governance/ducklake-standard/prepare.py --output /build --upstream /upstream --policast /policast $flags
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/target \
-    set -eu; locked=; [ ! -f Cargo.lock ] || locked=--locked; \
-    CARGO_TARGET_DIR=/target cargo test $locked --bins; \
-    CARGO_TARGET_DIR=/target cargo build $locked --bins; \
+    set -eu; test -f Cargo.lock; \
+    CARGO_TARGET_DIR=/target cargo test --locked --bins; \
+    CARGO_TARGET_DIR=/target cargo build --locked --bins; \
     mkdir /out /evidence; cp /target/debug/ducklake-qualification /target/debug/governed-delta-demo /target/debug/seed-ducklake-fixture /out/; \
     cargo metadata --locked --format-version 1 > /evidence/dependencies.json; \
     cp Cargo.lock upstream-changes.patch /evidence/; \

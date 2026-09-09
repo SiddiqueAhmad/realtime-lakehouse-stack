@@ -1,80 +1,93 @@
-# Standard PostgreSQL DuckLake + Policast / DataFusion 54 qualification
+# Standard PostgreSQL DuckLake + Policast / DataFusion 54.1
 
-Status: implementation under CI qualification; not a production-ready declaration.
+An isolated, executable qualification reference. The original Delta, Iceberg and
+experimental DuckLake references under `../delta-policast-sme-demo` are unchanged.
 
-This isolated reference is stacked on PR #18. It does not upgrade the original
-Delta/Iceberg/DuckLake binary or mutate their datasets.
+## Dependency and storage boundary
 
-## Stack and provenance
+- DataFusion 54.1.0; one Arrow dependency family.
+- `datafusion-ducklake` 0.7.0 source pinned at
+  `ad1b8c433179192e09bf66e8c84c46d61ba9306e`.
+- `PostgresSingleCatalogMetadataWriter` and `PostgresMetadataProvider`.
+  Every catalog has its own PostgreSQL schema/search_path inside a scratch database;
+  no library-specific multicatalog tables or `catalog_id` columns are created.
+- Pinned Policast `c6891d553fa1105546668c75b9a0d175bc54f70d` with a narrow LOCAL
+  DF54 compatibility port of the generic TableProvider. Parser, filter and masking
+  logic are unchanged. Optional upstream Delta/UC adapters are not compiled here.
+- MinIO for files. No DuckDB runtime, broker, CDC connector or catalog service.
+- Committed `Cargo.lock` with SHA-256
+  `4cfd29d6f7b732fc4d2666dd0fcbe1333f224d9a675b0db1a50e59682e873a38`.
+  Both control and corrected builds require `--locked`.
 
-- datafusion-ducklake 0.7.0, upstream commit ad1b8c433179192e09bf66e8c84c46d61ba9306e
-- DataFusion 54.1.0, one coherent Arrow release family
-- Policast c6891d553fa1105546668c75b9a0d175bc54f70d with a **local compatibility port**
-- PostgresSingleCatalogMetadataWriter + PostgresMetadataProvider
-- PostgreSQL and MinIO; no DuckDB runtime, CDC connector, Spark, Kafka, Flink or REST catalog
+## Corrections under test
 
-Each logical catalog uses a separate PostgreSQL schema/search_path inside a
-unique scratch database. There are no library-specific catalog_id/map tables.
-This tests the standard catalog layout; it does NOT prove bidirectional DuckDB
-writer compatibility or an in-place upgrade of the experimental multi-catalog.
+`prepare.py` stages pinned sources using checked edits and emits an auditable
+`upstream-changes.patch`, including the Policast manifest adjustment.
 
-## Changes being qualified
+1. Explicit snapshot IDs are validated against the provider's snapshot listing.
+   Missing/expired IDs fail rather than produce plausible successful results.
+2. Prepared writes check for newer table DDL inside the same commit transaction
+   holding the snapshot-counter lock. A stale schema returns `Conflict`; the
+   transaction rolls back. Append cannot retire omitted live columns even when
+   submitted sequentially. Reopen under the current schema before retrying.
+3. A separate defect exposed by full qualification is corrected: the standard
+   writer's `SELECT 1` conflict probe returned PostgreSQL INT4 but decoded `i64`.
+   Selecting `1::BIGINT` preserves the intended retryable conflict error.
 
-prepare.py stages copies of pinned source inputs. Checked substitutions abort
-on input drift; no original reference source is modified.
+These are local patches, not claims of upstream fixes or a released DF54 Policast.
+The production query boundary still prevents unsafe projection/filter/limit pushdown.
 
-1. with_snapshot validates that the requested snapshot exists.
-2. The standard writer checks concurrent schema changes under its transactional
-   snapshot-counter lock before reconciling columns. Append cannot remove a live
-   column even when given a stale schema sequentially.
-3. The generic Policast TableProvider implementation is ported to DF54 by removing
-   the obsolete as_any trait methods and selecting DF54 dependencies. Policy
-   parsing, CEL translation, filtering and masking logic are retained. Optional
-   Policast Delta/UC adapters are excluded from this isolated port.
-4. The same control-plane modules and conservative ReadBoundary are compiled
-   against this stack; the unchanged original 20-case test file runs against it.
+## Run
 
-The generated upstream patch and exact build dependency graph are retained in
-CI artifacts. FIXES=0 builds the same standard stack without the two storage
-fixes. CI requires both targeted controls to fail with the expected behavioral
-symptoms before running the corrected stack.
-
-## Important capability boundaries
-
-The standard writer in this pinned version is narrower than the experimental
-multi-catalog writer. Native update/delete, numeric promotion and compaction can
-return unsupported backend operations. Standard PostgreSQL native snapshot
-maintenance/GC is not implemented upstream in this version.
-
-The expiry regression uses a clearly labelled privileged **logical-expiry test
-fixture**: it removes old snapshot listing entries, preserves the head, and never
-reclaims files or column/file visibility metadata. This proves invalid-snapshot
-handling, not native maintenance. MAINT-01 is explicitly a limitation, not a pass.
-
-Unsupported operation reports require a matching unsupported error and unchanged
-catalog/row data. Wrong rows, crashes, missing objects and unexpected infrastructure
-errors are failures. All 54 case IDs remain accounted for; the former blocked DF54
-governance cases now invoke actual Policast and the original governance suite.
-CDC remains single-materializer simulation, not WAL or connector qualification.
-
-## Local execution
-
-From the repository root:
+From this directory, with Docker Compose and Python 3.10+:
 
 ```bash
-cd governance/ducklake-standard
 bash test-standard.sh
-# Reuse this reference's image, not the original governed-query image:
-SKIP_BUILD=1 bash test-standard.sh --case TT-05 --case SCHEMA-08 --case 'DF54-*'
 python3 test_guards.py
 ```
 
-Docker Compose and Python 3.10+ are required. No host Rust installation is needed.
-This Compose project publishes no ports and uses its own volumes, so the original
-demo may remain running. Do not use down -v: no volume reset is required.
+Once the CURRENT qualification image exists:
 
-Results are in evidence/df54/results.json, per-case files and worker journals.
-The 20-case governed log is evidence/df54/governance-20.log.
+```bash
+SKIP_BUILD=1 bash test-standard.sh --case TT-05 --case SCHEMA-08 --case 'DF54-*'
+```
 
-Exact lockfile capture/commit is required before declaring reproducible release
-qualification. Until CI has completed, do not infer success from these files.
+The first command builds with Rust tests, starts this reference's own PostgreSQL
+and MinIO stack, and executes the 54-case profile. `DF54-07` imports and runs the
+original 20-case governance file unchanged, substituting only its Compose deployment.
+Do not substitute the old `governed-query` image. No host Rust is required.
+
+Results: `evidence/df54/results.json`, per-case JSON, worker journals and
+`governance-20.log`. Additional guards: `guard-evidence/df54/guards.json`.
+The stack publishes no host ports. Scratch databases and prefixes isolate normal
+demo data. Stop it with `docker compose down`; no volume reset is needed.
+
+## CI proof and honest limitations
+
+The dedicated workflow first builds `FIXES=0` and requires the two exact regression
+failures (`TT-05`, `SCHEMA-08`). Infrastructure failures cannot satisfy this control.
+It then builds `FIXES=1` with the SAME lock, executes all 54 case handlers and the
+unchanged 20 governance cases, then verifies invalid IDs, valid empty snapshots,
+physical catalog layout, conflict typing, atomic rollback and fresh-schema retry.
+Both AMD64 and ARM64 run natively with 4 GiB/no-swap builders.
+
+A backend change does not inherit passes from another backend. Upstream 0.7.0's
+standard PostgreSQL writer lacks native UPDATE/DELETE/upsert, type promotion,
+compaction and cleanup/expiry/orphan APIs implemented on other backends. Attempted
+unsupported operations are classified only after checking committed metadata and
+rows are unchanged. Limitations and measurements are not passing cases.
+
+`TT-05` uses a clearly labelled LOGICAL-EXPIRY TEST FIXTURE: it removes an old
+snapshot listing entry while preserving the head and physical files. This proves
+unavailable-snapshot rejection, NOT native garbage collection, safe retention under
+concurrent physical deletion, or maintenance support. `MAINT-01` is a limitation.
+
+CDC remains single-materializer simulation, not WAL/Debezium/transport recovery.
+Standard catalog shape is tested, but cross-engine DuckDB write interoperability,
+full DuckLake-spec conformance, and migration from the experimental catalog are NOT
+claimed. Start with fresh catalogs, not an in-place switch of the older demo.
+
+Before the conflict-decoding correction, both target regressions and the original
+20 governance cases passed, but three broader cases failed on that decoding error.
+The corrected commit must complete its own CI run; this README does not predeclare
+its outcome. The PR records inspected, commit-specific final evidence.

@@ -35,6 +35,23 @@ def main():
         cols=suite.pg_schema(cat,"SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND column_name='catalog_id';")
         assert cols.strip().splitlines()[-1]=='0',cols
         report.append('GUARD-04 real metadata has no library-specific catalog maps or catalog_id columns')
+        suite.current_case='GUARD-05';suite.conflict()
+        report.append('GUARD-05 data-bearing Replace yields one winner and a typed retryable conflict')
+        suite.current_case='GUARD-06';cat=suite.init();suite.write(cat,records([0]));w=suite.worker()
+        suite.begin(w,cat,records([1]),'append')
+        fs=FIELDS+[{'name':'region','type':'string','nullable':True}]
+        new=[{**records([2])[0],'region':'east'}];suite.write(cat,new,fields=fs)
+        head=suite.state(cat)['head'];columns=suite.columns(cat)
+        try:suite.finish(w,cat)
+        except OperationError as e:assert 'conflict' in str(e).lower(),str(e)
+        else:raise AssertionError('stale schema append was not rejected at commit')
+        assert suite.state(cat)['head']==head;suite.exact(cat,new)
+        assert suite.columns(cat)==columns
+        fresh=suite.worker();suite.write(cat,[{**records([1])[0],'region':None}],'append',worker=fresh,fields=fs)
+        actual=suite.rows(cat)
+        for row in actual:row.setdefault('region',None)
+        equal(actual,new+[{**records([1])[0],'region':None}]);assert suite.columns(cat)==columns
+        report.append('GUARD-06 concurrent stale append rolls back atomically and fresh-schema retry succeeds')
     finally:
         (suite.output/'guards.json').write_text(json.dumps({'passed':report},indent=2));suite.close()
     for row in report:print('PASS '+row)
