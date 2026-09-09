@@ -1,0 +1,36 @@
+name: DuckLake standard PostgreSQL and Policast
+on:
+  push:
+    branches: [feature/ducklake-standard-pg-df54]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ducklake-standard-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve exact qualification source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/standard-sources/repo /tmp/standard-sources/upstream
+          git archive HEAD | tar -x -C /tmp/standard-sources/repo
+          git clone --filter=blob:none --no-checkout https://github.com/datafusion-contrib/datafusion-ducklake.git /tmp/df-source
+          git -C /tmp/df-source archive ad1b8c433179192e09bf66e8c84c46d61ba9306e | tar -x -C /tmp/standard-sources/upstream
+          mkdir -p /tmp/standard-sources/policast
+          git clone --filter=blob:none --no-checkout https://github.com/open-lakehouse/policast.git /tmp/policy-source
+          git -C /tmp/policy-source archive c6891d553fa1105546668c75b9a0d175bc54f70d | tar -x -C /tmp/standard-sources/policast
+          git rev-parse HEAD > /tmp/standard-sources/tested-commit.txt
+          tar -czf /tmp/standard-sources.tar.gz -C /tmp/standard-sources .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standard-pg-pinned-sources
+          path: /tmp/standard-sources.tar.gz
+          retention-days: 7
+          if-no-files-found: error
