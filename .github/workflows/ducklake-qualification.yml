@@ -40,7 +40,7 @@ jobs:
       - name: Validate executable runner and coverage
         run: |
           python3 -m py_compile tests/test_ducklake_qualification.py
-          python3 -m unittest discover -s tests -p 'test_qualification_runner.py' -v
+          python3 -m unittest discover -s tests -p 'test_qualification_*.py' -v
           bash -n test-ducklake-qualification.sh
       - name: Configure native memory-limited builder
         run: |

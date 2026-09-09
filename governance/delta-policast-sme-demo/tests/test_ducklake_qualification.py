@@ -19,6 +19,15 @@ def close_case_workers(suite):
         raise RuntimeError(f"worker cleanup failed: {errors}")
 
 
+def classify_outcome(lane, case_id, status, detail):
+    # These features are supported by the pinned 0.7 lane. An unsupported
+    # response is a regression/failure there, not a newly accepted limitation.
+    required_df54 = {'SCHEMA-05', 'MAINT-06', 'MAINT-07', 'PERF-02', 'DF54-04'}
+    if lane == 'df54' and case_id in required_df54 and status == 'KNOWN-LIMITATION':
+        return 'FAILED', f'Required DF54 capability was unavailable: {detail}'
+    return status, detail
+
+
 def run_lane(lane,output,selected):
     manifest=json.loads((ROOT/"tests/ducklake_qualification_cases.json").read_text())
     expected={c["id"] for c in manifest["cases"]}
@@ -45,6 +54,7 @@ def run_lane(lane,output,selected):
                 except Exception as error:
                     status="FAILED"
                     detail=f"{detail}; cleanup: {error}"
+            status,detail=classify_outcome(lane,case_id,status,detail)
             result={"id":case_id,"title":item["title"],"lane":lane,"status":status,"detail":detail,"seconds":time.monotonic()-start,"evidence":suite.details}
             results.append(result)
             (suite.output/f"{case_id}.json").write_text(json.dumps(result,indent=2))

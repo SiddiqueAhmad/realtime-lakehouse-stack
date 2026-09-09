@@ -1,6 +1,5 @@
 //! Privileged, disposable integration-test worker. Never installed in the query/UI image.
-//! A JSON-lines protocol lets Python coordinate genuinely independent processes,
-//! hold write sessions at deterministic barriers, and inspect real storage results.
+//! JSON-lines coordinate independent processes and deterministic write barriers.
 use std::{collections::HashMap, env, io::{self, BufRead, Write}, sync::Arc, time::Instant};
 use anyhow::{bail, ensure, Context, Result};
 use datafusion::{arrow::{array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray}, datatypes::{DataType, Field, Schema}, record_batch::RecordBatch}, catalog::CatalogProvider, physical_plan::{collect, displayable}, prelude::{SessionConfig, SessionContext}};
@@ -86,7 +85,9 @@ impl Worker {
         } else { ctx.register_catalog("lake",cat.clone()); }
         Ok((ctx,cat))
     }
-    async fn sql_rows(&self,sql:&str,cat:&str) -> Result<Vec<Value>> {
+    // All callers use constant SQL. SQLx 0.9 requires static query text;
+    // values still use bound parameters, never string interpolation.
+    async fn sql_rows(&self,sql:&'static str,cat:&str) -> Result<Vec<Value>> {
         let rs=sqlx::query(sql).bind(cat).fetch_all(&self.pool).await?;
         rs.into_iter().map(|r| Ok(serde_json::from_str(r.try_get::<String,_>(0)?.as_str())?)).collect()
     }
@@ -154,7 +155,8 @@ impl Worker {
                 #[cfg(feature="df54")] {
                     let (ctx,c)=self.context(&v,true).await?;
                     let p=c.schema("public").context("schema missing")?.table(text(&v,"table")?).await?.context("table missing")?;
-                    let t=p.as_any().downcast_ref::<datafusion_ducklake::DuckLakeTable>().context("not a DuckLakeTable")?;
+                    // DataFusion 54 TableProvider extends Any directly; as_any was removed.
+                    let t=(p.as_ref() as &dyn std::any::Any).downcast_ref::<datafusion_ducklake::DuckLakeTable>().context("not a DuckLakeTable")?;
                     let r=t.merge_adjacent_files(&ctx.state(),datafusion_ducklake::MergeOptions::default()).await?;
                     Ok(json!({"processed":r.files_processed,"created":r.files_created,"rows":r.rows_written}))
                 }
