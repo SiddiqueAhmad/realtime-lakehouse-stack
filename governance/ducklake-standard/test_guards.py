@@ -31,9 +31,9 @@ def main():
         report.append('GUARD-03 valid empty snapshot remains a valid empty answer')
         suite.current_case='GUARD-04';cat=suite.init();suite.write(cat,records([1]))
         maps=suite.pg_schema(cat,"SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name LIKE 'ducklake_catalog%';")
-        assert maps.strip().endswith('0'),maps
+        assert maps.strip().splitlines()[-1]=='0',maps
         cols=suite.pg_schema(cat,"SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND column_name='catalog_id';")
-        assert cols.strip().endswith('0'),cols
+        assert cols.strip().splitlines()[-1]=='0',cols
         report.append('GUARD-04 real metadata has no library-specific catalog maps or catalog_id columns')
     finally:
         (suite.output/'guards.json').write_text(json.dumps({'passed':report},indent=2));suite.close()

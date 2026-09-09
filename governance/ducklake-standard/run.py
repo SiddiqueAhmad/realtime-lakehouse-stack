@@ -12,15 +12,13 @@ import governance_parity
 import io
 
 h.COMPOSE=['docker','compose','-f',str(HERE/'docker-compose.yml')]
-# APIs actually absent from the standard writer; exact OperationError text is
-# required. Missing files, SQL failures, timeouts and wrong rows remain FAILED.
 UNSUPPORTED_CASES={'CDC-02','CDC-03','SCHEMA-05','MAINT-02','MAINT-03','MAINT-04','MAINT-05','MAINT-06','MAINT-07','DF54-03','DF54-04'}
 
 class StandardSuite(h.Suite):
     @property
     def image(self):return os.environ.get('STANDARD_IMAGE','ducklake-standard:patched')
     @image.setter
-    def image(self,value):pass  # The image is explicitly selected, not the old df54 tag.
+    def image(self,value):pass
     def call(self, op, cat, worker=None, **kw):
         mutations={'dml','promote','compact','cleanup','orphans','native_expire'}
         before=None
@@ -59,8 +57,10 @@ h.CASES['DF54-05']=policy_same_stack
 
 def deps(s):
     packages=s.graph['packages']
-    family={p['name']:p['version'] for p in packages if p['name']=='datafusion' or p['name'].startswith('datafusion-') and p['name']!='datafusion-ducklake'}
-    assert set(family.values())=={'54.1.0'},family
+    entries=[p for p in packages if p['name']=='datafusion' or p['name'].startswith('datafusion-') and p['name']!='datafusion-ducklake']
+    family={p['name']:p['version'] for p in entries}
+    assert {p['version'] for p in entries}=={'54.1.0'},entries
+    assert len(family)==len(entries),'duplicate DataFusion packages in resolved graph'
     arrow={p['version'] for p in packages if p['name'] in ('arrow','arrow-array','arrow-schema','arrow-buffer')};assert len(arrow)==1,arrow
     assert not any(p['name'] in ('duckdb','libduckdb-sys') for p in packages)
     assert sum(p['name']=='policast-datafusion' for p in packages)==1
@@ -79,8 +79,7 @@ def parity(s):
     s.details.update(original_suite_sha256=hashlib.sha256((BASE/'tests/test_governance.py').read_bytes()).hexdigest(),original_cases_passed=20,image=s.image)
 h.CASES['DF54-07']=parity
 
-# The expiry fixture qualifies the snapshot validation fix, not a native
-# standard maintenance implementation. MAINT-01 is intentionally NOT a pass.
+# TT-05 uses a logical-expiry fixture; this is NOT a native maintenance pass.
 def native_expiry_absent(s):
     cat=s.init();s.write(cat,records([1]));s.exact(cat,records([1]))
     try:s.call('native_expire',cat)
@@ -108,12 +107,15 @@ def run_lane(output,selected,expect_red=False):
             except OperationError as e:
                 status='FAILED';detail=str(e)
                 if cid in UNSUPPORTED_CASES and unsupported(e):
-                    # Confirm the explicitly unsupported mutation did not damage
-                    # the committed catalog. All current files must still read.
                     cat=cid.lower().replace('-','_')
-                    q=suite.query(cat);fresh=suite.worker()
-                    equal(q['rows'],suite.query(cat,worker=fresh)['rows'])
-                    status='KNOWN-LIMITATION';detail=f'standard-writer API unavailable: {e}'
+                    try:
+                        q=suite.query(cat);fresh=suite.worker()
+                        equal(q['rows'],suite.query(cat,worker=fresh)['rows'])
+                    except Exception as verification:
+                        status='FAILED';detail=f'{e}; post-failure verification: {verification}'
+                        suite.details['traceback']=traceback.format_exc()
+                    else:
+                        status='KNOWN-LIMITATION';detail=f'standard-writer API unavailable: {e}'
             except Exception as e:status='FAILED';detail=str(e);suite.details['traceback']=traceback.format_exc()
             finally:
                 if cid=='TT-05':suite.details['expiration']='controlled logical expiry fixture; native expiry/GC NOT qualified'

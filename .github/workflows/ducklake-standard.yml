@@ -28,9 +28,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Validate runner syntax
+      - name: Validate runner syntax and reporting guards
         run: |
           python3 -m py_compile governance/ducklake-standard/*.py
+          python3 -m unittest discover -s governance/ducklake-standard -p test_runner_units.py -v
           bash -n governance/ducklake-standard/test-standard.sh
           mkdir -p governance/ducklake-standard/evidence
           git rev-parse HEAD > governance/ducklake-standard/evidence/tested-commit.txt

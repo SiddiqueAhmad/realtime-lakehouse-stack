@@ -11,8 +11,10 @@ pub fn schema_name(catalog: &str) -> Result<String> {
 pub async fn catalog_pool(base: &PgPool, catalog: &str, initialize: bool) -> Result<PgPool> {
     let schema = schema_name(catalog)?;
     if initialize {
-        // Validated ASCII identifier; SQL values elsewhere are bound parameters.
-        sqlx::query(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+        // Identifier cannot be a bind parameter. schema_name above restricts the
+        // entire identifier to lowercase ASCII/digits/underscore and a fixed
+        // prefix; quotes, whitespace, punctuation and SQL syntax are rejected.
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"")))
             .execute(base).await?;
     }
     let connect=base.connect_options().as_ref().clone();
@@ -44,4 +46,17 @@ pub async fn expire_fixture_snapshots(pool: &PgPool, ids: &[i64]) -> Result<Vec<
     }
     tx.commit().await?;
     Ok(expired)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schema_name;
+    #[test]
+    fn schema_identifiers_reject_sql_syntax_and_truncation() {
+        for bad in ["", "public.other", "UPPER", "a\";DROP SCHEMA public;--", "a b", "x-y", "a\\b", "é"] {
+            assert!(schema_name(bad).is_err(), "accepted {bad:?}");
+        }
+        assert!(schema_name(&"a".repeat(56)).is_err());
+        assert_eq!(schema_name("tt_05").unwrap(), "lake_tt_05");
+    }
 }
