@@ -1,0 +1,40 @@
+name: Capture standard qualification lock
+on:
+  push:
+    branches: ['feature/ducklake-standard-pg-df54']
+    paths: ['.github/workflows/commit-standard-lock.yml']
+permissions:
+  contents: read
+jobs:
+  lock:
+    if: github.repository == 'SiddiqueAhmad/realtime-lakehouse-stack' && github.ref == 'refs/heads/feature/ducklake-standard-pg-df54'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ducklake-standard-amd64
+          run-id: 34323551725
+          github-token: ${{ github.token }}
+          path: /tmp/standard-lock-evidence
+      - name: Commit only the exact inspected lockfile
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          lock=/tmp/standard-lock-evidence/evidence/df54/Cargo.lock
+          echo '4cfd29d6f7b732fc4d2666dd0fcbe1333f224d9a675b0db1a50e59682e873a38  '"$lock" | sha256sum -c -
+          test ! -f governance/ducklake-standard/Cargo.lock
+          cp "$lock" governance/ducklake-standard/Cargo.lock
+          git add -f governance/ducklake-standard/Cargo.lock
+          test "$(git diff --cached --name-only)" = governance/ducklake-standard/Cargo.lock
+          test "$(git ls-remote origin refs/heads/feature/ducklake-standard-pg-df54 | cut -f1)" = "$EXPECTED_HEAD"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Lock exact DataFusion 54.1 and Policast qualification dependencies'
+          git push origin HEAD:refs/heads/feature/ducklake-standard-pg-df54
