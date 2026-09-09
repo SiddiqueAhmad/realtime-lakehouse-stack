@@ -1,0 +1,70 @@
+{
+  "version_lanes": {
+    "df53-baseline": "datafusion-ducklake 0.3.0 + DataFusion 53.1 + pinned Policast",
+    "df54-latest": "pinned latest DF54-compatible DuckLake release; initial target 0.7.0"
+  },
+  "result_classes": ["PASS", "SUPPORTED-BUT-FAILED", "KNOWN-LIMITATION", "METRIC"],
+  "cases": [
+    {"id":"CDC-01","area":"cdc","title":"initial state then insert","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CDC-02","area":"cdc","title":"update existing key","mode":"acceptance","df53":"materialization-path","df54":"native-dml-must-pass"},
+    {"id":"CDC-03","area":"cdc","title":"delete existing key","mode":"acceptance","df53":"materialization-path","df54":"native-dml-must-pass"},
+    {"id":"CDC-04","area":"cdc","title":"duplicate replay is idempotent","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CDC-05","area":"cdc","title":"transaction batch visibility","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CDC-06","area":"cdc","title":"out-of-order event characterization","mode":"characterization","df53":"characterize","df54":"characterize"},
+    {"id":"CDC-07","area":"cdc","title":"restart and replay boundary","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+
+    {"id":"CONC-01","area":"concurrency","title":"concurrent same-table appends 2/4/8/16 writers","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CONC-02","area":"concurrency","title":"concurrent different-table writes","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CONC-03","area":"concurrency","title":"concurrent data-bearing Replace conflict","mode":"acceptance","df53":"must-pass-or-explicit-conflict","df54":"must-pass-or-explicit-conflict"},
+    {"id":"CONC-04","area":"concurrency","title":"Append versus Replace race","mode":"characterization","df53":"characterize","df54":"characterize"},
+    {"id":"CONC-05","area":"concurrency","title":"snapshot-pinned reader during writes","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CONC-06","area":"concurrency","title":"dropped/crashed write session exposes nothing partial","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"CONC-07","area":"concurrency","title":"50-iteration stress at 2/4/8 writers","mode":"stress","df53":"must-pass","df54":"must-pass"},
+
+    {"id":"MW-01","area":"multiwriter","title":"independent writer instances append same table","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MW-02","area":"multiwriter","title":"independent Replace writers from same base","mode":"acceptance","df53":"must-pass-or-explicit-conflict","df54":"must-pass-or-explicit-conflict"},
+    {"id":"MW-03","area":"multiwriter","title":"unique snapshots and monotonic catalog head","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MW-04","area":"multiwriter","title":"writer restart has no local-state dependency","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MW-05","area":"multiwriter","title":"catalog lock timeout/retry behavior","mode":"characterization","df53":"explicit-bounded-failure","df54":"explicit-bounded-failure"},
+    {"id":"MW-06","area":"multiwriter","title":"cross-catalog logical and physical isolation","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+
+    {"id":"TT-01","area":"time-travel","title":"explicit old snapshot read","mode":"acceptance","df53":"api-must-pass","df54":"must-pass"},
+    {"id":"TT-02","area":"time-travel","title":"pinned snapshot remains stable","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"TT-03","area":"time-travel","title":"historical schema read","mode":"acceptance","df53":"characterize-if-limited","df54":"must-pass-if-supported"},
+    {"id":"TT-04","area":"time-travel","title":"historical replaced/deleted row state","mode":"acceptance","df53":"must-pass-before-expiry","df54":"must-pass-before-expiry"},
+    {"id":"TT-05","area":"time-travel","title":"expired snapshot unavailable while head survives","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"TT-06","area":"time-travel","title":"SQL time-travel syntax","mode":"characterization","df53":"known-limitation-if-unsupported","df54":"characterize"},
+
+    {"id":"SCHEMA-01","area":"schema-evolution","title":"add nullable column","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"SCHEMA-02","area":"schema-evolution","title":"add required column without valid default","mode":"negative","df53":"must-reject-or-document","df54":"must-reject-or-document"},
+    {"id":"SCHEMA-03","area":"schema-evolution","title":"drop column","mode":"acceptance","df53":"characterize","df54":"must-pass-if-supported"},
+    {"id":"SCHEMA-04","area":"schema-evolution","title":"rename column preserving values/identity","mode":"acceptance","df53":"characterize","df54":"must-pass-if-supported"},
+    {"id":"SCHEMA-05","area":"schema-evolution","title":"widen numeric type","mode":"acceptance","df53":"characterize","df54":"must-pass-if-supported"},
+    {"id":"SCHEMA-06","area":"schema-evolution","title":"narrow/incompatible type change","mode":"negative","df53":"must-reject","df54":"must-reject"},
+    {"id":"SCHEMA-07","area":"schema-evolution","title":"policy referencing removed/renamed column fails closed","mode":"governance","df53":"must-pass","df54":"blocked-until-governed-df54"},
+    {"id":"SCHEMA-08","area":"schema-evolution","title":"schema evolution versus old-schema append race","mode":"concurrency","df53":"explicit-success-or-conflict","df54":"explicit-success-or-conflict"},
+
+    {"id":"MAINT-01","area":"maintenance","title":"snapshot expiration preserves current state","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MAINT-02","area":"maintenance","title":"cleanup dry-run is non-destructive","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MAINT-03","area":"maintenance","title":"cleanup removes superseded files only","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MAINT-04","area":"maintenance","title":"orphan discovery/removal protects referenced data","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MAINT-05","area":"maintenance","title":"maintenance idempotency","mode":"acceptance","df53":"must-pass","df54":"must-pass"},
+    {"id":"MAINT-06","area":"maintenance","title":"small-file compaction preserves rowset and reduces file count","mode":"acceptance","df53":"known-limitation-if-no-api","df54":"must-pass-if-supported"},
+    {"id":"MAINT-07","area":"maintenance","title":"compaction with pinned/fresh readers","mode":"acceptance","df53":"known-limitation-if-no-api","df54":"must-pass-if-supported"},
+
+    {"id":"PERF-01","area":"partition-perf","title":"unpartitioned selective-filter baseline","mode":"metric","df53":"metric","df54":"metric"},
+    {"id":"PERF-02","area":"partition-perf","title":"partition-pruning structural file-count check","mode":"structural","df53":"known-limitation","df54":"must-pass-if-supported"},
+    {"id":"PERF-03","area":"partition-perf","title":"Parquet statistics pruning","mode":"structural","df53":"record","df54":"must-pass-if-supported"},
+    {"id":"PERF-04","area":"partition-perf","title":"raw versus governed provider pruning","mode":"metric","df53":"record-governance-cost","df54":"blocked-until-governed-df54"},
+    {"id":"PERF-05","area":"partition-perf","title":"planning at 10/100/1000 files","mode":"metric","df53":"metric","df54":"metric"},
+    {"id":"PERF-06","area":"partition-perf","title":"cold/warm median and p95 evidence","mode":"metric","df53":"metric","df54":"metric"},
+
+    {"id":"DF54-01","area":"df54","title":"standalone latest adapter compiles AMD64/ARM64","mode":"compatibility","df53":"n/a","df54":"must-pass"},
+    {"id":"DF54-02","area":"df54","title":"healthcare/invoice read-write fixture parity","mode":"compatibility","df53":"n/a","df54":"must-pass"},
+    {"id":"DF54-03","area":"df54","title":"native UPDATE and DELETE current-state correctness","mode":"compatibility","df53":"n/a","df54":"must-pass-if-supported"},
+    {"id":"DF54-04","area":"df54","title":"latest maintenance and partition capabilities","mode":"compatibility","df53":"n/a","df54":"must-pass-if-supported"},
+    {"id":"DF54-05","area":"df54","title":"Policast governed integration compatibility gate","mode":"compatibility","df53":"n/a","df54":"known-limitation-until-policast-upgrade"},
+    {"id":"DF54-06","area":"df54","title":"no accidental dual-DataFusion production binary","mode":"architecture","df53":"n/a","df54":"must-pass"},
+    {"id":"DF54-07","area":"df54","title":"upgrade trigger runs existing 20 governance cases unchanged","mode":"future-gate","df53":"n/a","df54":"activate-when-compatible"}
+  ]
+}

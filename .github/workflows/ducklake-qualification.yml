@@ -1,0 +1,102 @@
+name: DuckLake executable qualification
+on:
+  pull_request:
+    paths:
+      - 'governance/delta-policast-sme-demo/**'
+      - '.github/workflows/ducklake-qualification.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ducklake-qualification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  behavioral:
+    name: qualification (${{ matrix.lane }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: df53
+            arch: amd64
+            runner: ubuntu-24.04
+          - lane: df54
+            arch: amd64
+            runner: ubuntu-24.04
+          - lane: df53
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - lane: df54
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: governance/delta-policast-sme-demo
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate executable runner and coverage
+        run: |
+          python3 -m py_compile tests/test_ducklake_qualification.py
+          python3 -m unittest discover -s tests -p 'test_qualification_*.py' -v
+          bash -n test-ducklake-qualification.sh
+      - name: Configure native memory-limited builder
+        run: |
+          mkdir -p qualification-evidence
+          git rev-parse HEAD > qualification-evidence/tested-commit.txt
+          uname -m > qualification-evidence/architecture.txt
+          docker buildx create --name qualification --driver docker-container \
+            --driver-opt memory=4g --driver-opt memory-swap=4g --use --bootstrap
+      - name: Build actual Rust qualification worker
+        id: build
+        run: |
+          set -o pipefail
+          docker buildx build --builder qualification --load --progress=plain \
+            --build-arg LANE=${{ matrix.lane }} -f qualification/Dockerfile \
+            -t ducklake-qualification:${{ matrix.lane }} . \
+            2>&1 | tee qualification-evidence/build.log
+      - name: Run behavioral cases against Postgres and MinIO
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          LANE=${{ matrix.lane }} SKIP_BUILD=1 bash test-ducklake-qualification.sh \
+            2>&1 | tee qualification-evidence/runner.log
+      - name: Evidence summary
+        if: always()
+        run: |
+          mkdir -p qualification-evidence
+          docker exec buildx_buildkit_qualification0 sh -c \
+            'for f in memory.max memory.swap.max memory.peak memory.events; do echo "== $f =="; cat /sys/fs/cgroup/$f; done' \
+            > qualification-evidence/build-memory.txt 2>&1 || true
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
+              summary.write('## Actual DuckLake qualification: ${{ matrix.lane }} / ${{ matrix.arch }}\n')
+              reports=list(Path('qualification-evidence').glob('*/results.json'))
+              if not reports:
+                  summary.write('No behavioral result report: build/setup failed. NOT PASS.\n')
+              for report in reports:
+                  data=json.loads(report.read_text())
+                  summary.write(json.dumps(data['counts'])+'\n\n')
+                  summary.write('| Case | Result | Evidence |\n|---|---|---|\n')
+                  for r in data['cases']:
+                      summary.write(f"| {r['id']} | {r['status']} | {r['detail'].replace('|','/').replace(chr(10),' ')} |\n")
+                  summary.write('\nLimitations, metrics and blocked cases are NOT passing behavioral tests.\n')
+          PY
+      - name: Upload logs, rowsets, snapshots, plans, IO and dependency evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ducklake-qualification-${{ matrix.lane }}-${{ matrix.arch }}
+          path: governance/delta-policast-sme-demo/qualification-evidence/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Stop disposable CI stack
+        if: always()
+        run: |
+          docker ps -aq --filter name=dq- | xargs -r docker rm -f
+          docker compose down
+          docker buildx rm qualification || true

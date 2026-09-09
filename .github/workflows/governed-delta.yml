@@ -31,10 +31,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Architecture and fixture checks
+      - name: Architecture, fixture and qualification-contract checks
         run: |
           python3 -m unittest discover -s tests -p 'test_layout.py' -v
+          python3 -m unittest discover -s tests -p 'test_ducklake_qualification_manifest.py' -v
           python3 -m py_compile tests/test_governance.py
+          python3 -m json.tool tests/ducklake_qualification_cases.json >/dev/null
           for script in *.sh; do bash -n "$script"; done
       - name: Configure memory-limited native builder
         run: |
@@ -95,6 +97,7 @@ jobs:
             echo '## Governed Delta + Iceberg v3 + DuckLake: ${{ matrix.arch }}'
             echo 'Native build; BuildKit memory limit 4 GiB, swap disabled; Cargo jobs=1.'
             echo 'The identical 20-case governance suite runs against all three storage adapters.'
+            echo 'DuckLake production qualification cases are contract-checked separately; behavioral runners are added category-by-category.'
             echo 'Build/Rust: ${{ steps.build.outcome }}'
             echo 'Delta E2E: ${{ steps.delta.outcome }}'
             echo 'Iceberg v3 E2E: ${{ steps.iceberg.outcome }}'
