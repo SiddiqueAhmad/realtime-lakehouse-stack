@@ -16,7 +16,9 @@ def perf_filter(s):
 @case("PERF-02")
 def perf_partition(s):
     cat=s.init();s.write(cat,[])
-    try:s.call("dml",cat,sql="ALTER TABLE events SET PARTITIONED BY (tenant)")
+    # The DuckLake DDL wrapper resolves unqualified names in 'main', independently
+    # of DataFusion's default schema. Our fixture is in 'public': qualify it.
+    try:s.call("dml",cat,sql="ALTER TABLE lake.public.events SET PARTITIONED BY (tenant)")
     except OperationError as e:
         if not (unsupported(e) or "parser" in str(e).lower() or "expected" in str(e).lower()):raise
         limited(f"partition DDL unavailable in this lane: {e}")
