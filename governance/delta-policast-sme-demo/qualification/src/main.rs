@@ -1,9 +1,9 @@
 //! Privileged, disposable integration-test worker. Never installed in the query/UI image.
 //! A JSON-lines protocol lets Python coordinate genuinely independent processes,
 //! hold write sessions at deterministic barriers, and inspect real storage results.
-use std::{collections::{BTreeMap, HashMap}, env, io::{self, BufRead, Write}, sync::Arc, time::Instant};
+use std::{collections::HashMap, env, io::{self, BufRead, Write}, sync::Arc, time::Instant};
 use anyhow::{bail, ensure, Context, Result};
-use datafusion::{arrow::{array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray}, datatypes::{DataType, Field, Schema}, record_batch::RecordBatch}, catalog::CatalogProvider, physical_plan::{collect, displayable, ExecutionPlan}, prelude::{SessionConfig, SessionContext}};
+use datafusion::{arrow::{array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray}, datatypes::{DataType, Field, Schema}, record_batch::RecordBatch}, catalog::CatalogProvider, physical_plan::{collect, displayable}, prelude::{SessionConfig, SessionContext}};
 use datafusion_ducklake::{DuckLakeCatalog, DuckLakeTableWriter, MetadataProvider, MetadataWriter, MulticatalogManager, MulticatalogProvider, PostgresMetadataWriter, TableWriteSession, WriteMode, initialize_multicatalog_schema};
 use datafusion_ducklake::maintenance::{ExpireCriteria, CleanupCriteria, cleanup_old_files_in_catalog, delete_orphaned_files_multicatalog};
 use futures::TryStreamExt;
@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use url::Url;
 mod measured_store;
+mod plan_metrics;
 use measured_store::MeasuredStore;
 #[cfg(not(feature = "df54"))]
 #[path = "../../app/src/query_runtime.rs"]
@@ -96,13 +97,8 @@ impl Worker {
         let schema=plan.schema(); let plan_ms=start.elapsed().as_secs_f64()*1000.;
         if v["plan_only"].as_bool().unwrap_or(false) {return Ok(json!({"planning_ms":plan_ms,"plan":displayable(plan.as_ref()).indent(true).to_string(),"io":self.store.measurements()}));}
         let exec=Instant::now(); let bs=collect(plan.clone(),ctx.task_ctx()).await?;
-        let mut metrics=BTreeMap::<String,usize>::new();
-        fn visit(p:&Arc<dyn ExecutionPlan>,m:&mut BTreeMap<String,usize>) {
-            if let Some(ms)=p.metrics() {for metric in ms.iter() {let value=metric.value(); *m.entry(value.name().to_string()).or_default()+=value.as_usize();}}
-            for c in p.children() {visit(c,m);}
-        }
-        visit(&plan,&mut metrics);
-        Ok(json!({"rows":rows_json(&bs)?,"schema":schema.fields().iter().map(|f|json!({"name":f.name(),"type":format!("{:?}",f.data_type()),"nullable":f.is_nullable()})).collect::<Vec<_>>(),"planning_ms":plan_ms,"execution_ms":exec.elapsed().as_secs_f64()*1000.,"plan":displayable(plan.as_ref()).indent(true).to_string(),"metrics":metrics,"io":self.store.measurements()}))
+        let (metrics, metric_series, unavailable_metrics)=plan_metrics::capture(&plan);
+        Ok(json!({"rows":rows_json(&bs)?,"schema":schema.fields().iter().map(|f|json!({"name":f.name(),"type":format!("{:?}",f.data_type()),"nullable":f.is_nullable()})).collect::<Vec<_>>(),"planning_ms":plan_ms,"execution_ms":exec.elapsed().as_secs_f64()*1000.,"plan":displayable(plan.as_ref()).indent(true).to_string(),"metrics":metrics,"metric_series":metric_series,"unavailable_metrics":unavailable_metrics,"io":self.store.measurements()}))
     }
     async fn handle(&mut self,v:Value) -> Result<Value> {
         let op=text(&v,"op")?;
@@ -177,7 +173,6 @@ impl Worker {
             },
             "cleanup" | "orphans" => {
                 let dry=v["dry_run"].as_bool().context("dry_run required")?;
-                // Only unique disposable database/root accepted at startup. No normal demo path is reachable.
                 let r=if op=="cleanup" {cleanup_old_files_in_catalog(&mgr,&cat,self.store.clone(),CleanupCriteria::All,dry).await?}
                 else {delete_orphaned_files_multicatalog(&mgr,self.store.clone(),CleanupCriteria::All,dry).await?};
                 Ok(json!({"paths":r}))

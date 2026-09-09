@@ -17,7 +17,9 @@ futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls-ring"] }
-datafusion = "=54.0.0"
+# 54.0.0 resolves newer ^54 internal crates but does not compile against their
+# RecursiveQueryExec API. Pin the coherent 54.1 release family in this lane.
+datafusion = "=54.1.0"
 datafusion-ducklake = { version = "=0.7.0", default-features = false, features = ["write-postgres", "tls-rustls-ring"] }
 object_store = { version = "=0.13.2", features = ["aws"] }
 url = "2.5"

@@ -18,7 +18,7 @@ Python 3.10+ and Docker Compose are required. Host Rust is not required. Do not 
 ## Lanes and boundaries
 
 - DF53: DuckLake adapter 0.3.0, DataFusion 53.1.0 and the actual existing `app/src/query_runtime.rs`/Policast boundary for schema-policy and governed-I/O cases.
-- DF54: DuckLake adapter 0.7.0, DataFusion 54.0.0 and SQLx 0.9, in a separate raw-storage worker. Not described as latest without a future version check. No claim of Policast governance on DF54.
+- DF54: DuckLake adapter 0.7.0, DataFusion 54.1.0 and SQLx 0.9, in a separate raw-storage worker. Initial CI caught DataFusion 54.0.0 failing to compile against its newer 54.1 internal dependencies. This lane is now aligned to 54.1.0, and DF54-06 checks the entire resolved DataFusion family. No claim of Policast governance on DF54.
 - Both qualify the adapter's **library-specific PostgreSQL multicatalog layout**, not official DuckLake catalog-format interoperability with DuckDB.
 - CDC is a single-materializer simulation with sequence numbers and tombstones persisted in DuckLake. DF54 also executes native UPDATE/DELETE. The test-only full-state Replace materializer is not a production CDC implementation: no WAL, Debezium, source offsets, cross-table transaction or exactly-once claims.
 - Qualification images are separate from governed-query and governance-UI. Privileged write/cleanup operations are not installed into those product images.
@@ -29,12 +29,12 @@ PASS means actual behavioral assertions held. FAILED covers wrong data/schema, f
 
 KNOWN-LIMITATION records an explicit unsupported API/syntax response or the precisely checked stale-append characterization; it is not a pass. Silent wrong results and accepted expired snapshots fail. METRIC records measured queries whose row assertions held, without flaky time thresholds. BLOCKED identifies DF54 governance that cannot yet run. NOT_APPLICABLE identifies DF54-only cases in the DF53 report. Neither counts as PASS.
 
-The report marks qualification incomplete when FAILED or BLOCKED is nonzero. The unchanged original 20-case governed suite remains independently enforced by `governed-delta.yml`; its green badge never overrides qualification failures.
+The report marks qualification incomplete when FAILED or BLOCKED is nonzero, or only a subset was selected. The unchanged original 20-case governed suite remains independently enforced by `governed-delta.yml`; its green badge never overrides qualification failures. Optimized Python execution (-O/PYTHONOPTIMIZE) is rejected because it disables assertions.
 
 ## Evidence
 
 `qualification-evidence/<lane>/<ID>.json` and `results.json` contain individual outcomes. Worker JSON-line journals retain synthetic rowsets, errors and barrier operations. Rust reports actual catalog snapshots/files/schema plus DataFusion physical plans, metrics and object-store read counts. Byte counters are response-range sizes including footers, not consumed network-byte/billing measurements.
 
-Writes are prepared before concurrent finish calls; every future is joined and every worker failure propagates. Fault testing really SIGKILLs an independent writer container. Stress is 50 append iterations at 2/4/8 writers and 50 same-base Replace conflicts. Performance includes 10/100/1000 committed files plus fresh-process/repeated-query median/p95; no claim that OS or MinIO caches were flushed. These are functional/debug-profile builds without debug symbols, not optimized benchmarks.
+Writes are prepared before concurrent finish calls; every future is joined and every worker failure propagates. Fault testing really SIGKILLs an independent writer container. Stress is 50 append iterations at 2/4/8 writers and 50 same-base Replace conflicts. Performance includes 10/100/1000 committed files plus fresh-process/repeated-query median/nearest-rank p95; no claim that OS or MinIO caches were flushed. Pruning timers are not used as proof that anything was pruned. These are functional/debug-profile builds without debug symbols, not optimized benchmarks.
 
 Actions runs both lanes on native AMD64/ARM64 with 4 GiB/no-swap builders. Logs, exact Cargo.lock, dependency graphs and per-case evidence are uploaded on failures too. Source organization is under `tests/qualification/`; the manifest is a coverage contract, not the behavioral runner.

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 PATH = Path(__file__).with_name('test_ducklake_qualification.py')
@@ -45,6 +46,27 @@ class ExecutableRunnerTests(unittest.TestCase):
             def rows(self, cat, worker): return [runner.change(1, 2, 1)]
         with self.assertRaises(AssertionError):
             runner.materialize(Storage(), 'test', [runner.change(1, 2, 999)])
+
+    def test_main_worker_is_discarded_between_cases(self):
+        closed = []
+        main = SimpleNamespace(close=lambda: closed.append('main'))
+        other = SimpleNamespace(close=lambda: closed.append('other'))
+        suite = SimpleNamespace(main=main, workers=[main, other])
+        runner.close_case_workers(suite)
+        self.assertEqual(closed, ['main', 'other'])
+        self.assertEqual(suite.workers, [])
+        self.assertIsNone(suite.main)
+
+    def test_cleanup_failure_does_not_retain_crashed_main(self):
+        closed = []
+        def fail(): raise RuntimeError('cleanup failure')
+        main = SimpleNamespace(close=fail)
+        other = SimpleNamespace(close=lambda: closed.append('other'))
+        suite = SimpleNamespace(main=main, workers=[main, other])
+        with self.assertRaises(RuntimeError): runner.close_case_workers(suite)
+        self.assertEqual(closed, ['other'])
+        self.assertEqual(suite.workers, [])
+        self.assertIsNone(suite.main)
 
 
 if __name__ == '__main__': unittest.main()

@@ -1,4 +1,5 @@
 from .harness import *
+import math
 
 def perf_data(s,files=16):
     cat=s.init();s.write(cat,records(range(128)))
@@ -31,7 +32,8 @@ def perf_partition(s):
 def perf_stats(s):
     cat=perf_data(s);full=s.query(cat);r=s.query(cat,"SELECT * FROM events WHERE id=129")
     equal(full["rows"],records(range(2048)));equal(r["rows"],records([129]))
-    pruned=sum(v for k,v in r["metrics"].items() if "prun" in k and "matched" not in k)
+    # A nonzero pruning timer is NOT proof that anything was pruned.
+    pruned=sum(v for k,v in r["metrics"].items() if k.endswith("_pruned") and "time" not in k)
     assert pruned>0 or r["io"]["response_range_bytes"]<full["io"]["response_range_bytes"],"no physical statistics-pruning evidence"
     s.details.update(metrics=r["metrics"],full_io=full["io"],selective_io=r["io"],plan=r["plan"])
 
@@ -65,5 +67,5 @@ def perf_warm(s):
         r=s.query(cat,"SELECT * FROM events WHERE id=129",worker=w);equal(r["rows"],records([129]))
         samples.append({"ms":r["planning_ms"]+r["execution_ms"],"io":r["io"]})
     warm=[x["ms"] for x in samples[1:]]
-    s.details.update(first_fresh_process=samples[0],warm_median_ms=statistics.median(warm),warm_p95_ms=sorted(warm)[int(0.95*(len(warm)-1))],samples=samples,cache_scope="fresh process first read, NOT OS or MinIO cache eviction")
+    s.details.update(first_fresh_process=samples[0],warm_median_ms=statistics.median(warm),warm_p95_ms=sorted(warm)[math.ceil(0.95*len(warm))-1],percentile_method="nearest-rank",samples=samples,cache_scope="fresh process first read, NOT OS or MinIO cache eviction")
     raise Outcome("METRIC","fresh-process and repeated-query latency, exact rowsets checked for every sample")

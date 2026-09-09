@@ -30,7 +30,6 @@ def df54_dml(s):
 @case("DF54-04")
 def df54_maintenance(s):
     if s.lane!="df54":raise Outcome("NOT_APPLICABLE","DF54-only case")
-    # Real operations again, not a proxy check against another test's PASS string.
     perf_partition(s)
     old_case=s.current_case;s.current_case+="_compact"
     try:maint_compact(s)
@@ -51,10 +50,11 @@ def df54_policast(s):
 @case("DF54-06")
 def df54_dependencies(s):
     if s.lane!="df54":raise Outcome("NOT_APPLICABLE","DF54-only case")
-    packages=s.graph["packages"];versions={p["version"] for p in packages if p["name"]=="datafusion"}
-    assert versions=={"54.0.0"},f"multiple/wrong DataFusion versions: {versions}"
+    packages=s.graph["packages"]
+    family={p["name"]:p["version"] for p in packages if p["name"]=="datafusion" or (p["name"].startswith("datafusion-") and p["name"]!="datafusion-ducklake")}
+    assert family and set(family.values())=={"54.1.0"},f"incoherent DataFusion release family: {family}"
     assert not any(p["name"] in ("duckdb","libduckdb-sys","policast-datafusion") for p in packages),"unexpected runtime dependency"
-    s.details["datafusion_versions"]=sorted(versions)
+    s.details["datafusion_family"]=family
 
 @case("DF54-07")
 def df54_governance_gate(s):
