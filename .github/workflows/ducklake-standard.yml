@@ -9,28 +9,102 @@ concurrency:
   group: ducklake-standard-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  provenance:
-    runs-on: ubuntu-24.04
+  qualification:
+    name: standard-pg (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Preserve exact qualification source inputs
-        shell: bash
+      - name: Validate runner syntax
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/standard-sources/repo /tmp/standard-sources/upstream
-          git archive HEAD | tar -x -C /tmp/standard-sources/repo
-          git clone --filter=blob:none --no-checkout https://github.com/datafusion-contrib/datafusion-ducklake.git /tmp/df-source
-          git -C /tmp/df-source archive ad1b8c433179192e09bf66e8c84c46d61ba9306e | tar -x -C /tmp/standard-sources/upstream
-          mkdir -p /tmp/standard-sources/policast
-          git clone --filter=blob:none --no-checkout https://github.com/open-lakehouse/policast.git /tmp/policy-source
-          git -C /tmp/policy-source archive c6891d553fa1105546668c75b9a0d175bc54f70d | tar -x -C /tmp/standard-sources/policast
-          git rev-parse HEAD > /tmp/standard-sources/tested-commit.txt
-          tar -czf /tmp/standard-sources.tar.gz -C /tmp/standard-sources .
+          python3 -m py_compile governance/ducklake-standard/*.py
+          bash -n governance/ducklake-standard/test-standard.sh
+          mkdir -p governance/ducklake-standard/evidence
+          git rev-parse HEAD > governance/ducklake-standard/evidence/tested-commit.txt
+          uname -m > governance/ducklake-standard/evidence/architecture.txt
+          docker buildx create --name standard --driver docker-container --driver-opt memory=4g --driver-opt memory-swap=4g --use --bootstrap
+      - name: Build unpatched storage control with DF54 Policast
+        id: control_build
+        run: |
+          set -o pipefail
+          docker buildx build --builder standard --load --progress=plain -f governance/ducklake-standard/Dockerfile --build-arg FIXES=0 -t ducklake-standard:upstream . 2>&1 | tee governance/ducklake-standard/evidence/control-build.log
+      - name: Reproduce both defects on standard catalog without fixes
+        id: control
+        run: |
+          cd governance/ducklake-standard
+          docker compose up -d --wait postgres minio
+          docker compose run --rm minio-init
+          STANDARD_IMAGE=ducklake-standard:upstream python3 run.py --output control-evidence --case TT-05 --case SCHEMA-08 --expect-red 2>&1 | tee evidence/control.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r={x['id']:x for x in json.loads(Path('control-evidence/df54/results.json').read_text())['cases']}
+          assert r['TT-05']['detail'].startswith('expired snapshot accepted'),r['TT-05']
+          assert r['SCHEMA-08']['detail'].startswith('rowset mismatch:'),r['SCHEMA-08']
+          PY
+      - name: Build corrected storage and governed runtime
+        id: corrected_build
+        if: ${{ !cancelled() && steps.control_build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          docker buildx build --builder standard --load --progress=plain -f governance/ducklake-standard/Dockerfile --build-arg FIXES=1 -t ducklake-standard:patched . 2>&1 | tee governance/ducklake-standard/evidence/corrected-build.log
+      - name: Run standard qualification and unchanged 20 governance cases
+        if: ${{ !cancelled() && steps.corrected_build.outcome == 'success' }}
+        run: |
+          cd governance/ducklake-standard
+          docker compose up -d --wait postgres minio
+          docker compose run --rm minio-init
+          STANDARD_IMAGE=ducklake-standard:patched python3 run.py 2>&1 | tee evidence/qualification.log
+      - name: Invalid snapshot, retry and catalog-layout regressions
+        if: ${{ !cancelled() && steps.corrected_build.outcome == 'success' }}
+        run: |
+          cd governance/ducklake-standard
+          STANDARD_IMAGE=ducklake-standard:patched python3 test_guards.py 2>&1 | tee evidence/guards.log
+      - name: Capture resource and source evidence
+        if: always()
+        run: |
+          mkdir -p governance/ducklake-standard/evidence
+          docker exec buildx_buildkit_standard0 sh -c 'for f in memory.max memory.swap.max memory.peak memory.events; do echo "== $f =="; cat /sys/fs/cgroup/$f; done' > governance/ducklake-standard/evidence/build-memory.txt 2>&1 || true
+          git archive HEAD governance/ducklake-standard governance/delta-policast-sme-demo > governance/ducklake-standard/evidence/tested-source.tar
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path('governance/ducklake-standard/evidence/df54/results.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('## Standard PostgreSQL catalog + local Policast DF54 port\n')
+              if not p.exists(): f.write('No complete behavioral report. NOT QUALIFIED.\n')
+              else:
+                  r=json.loads(p.read_text());f.write(str(r['counts'])+'\n\n')
+                  f.write('| Case | Outcome | Detail |\n|---|---|---|\n')
+                  for x in r['cases']:f.write(f"| {x['id']} | {x['status']} | {x['detail'].replace('|','/').replace(chr(10),' ')} |\n")
+                  f.write('\nLogical expiry uses an explicitly labelled test fixture. Native standard maintenance and cross-engine writing are not claimed.\n')
+          PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: standard-pg-pinned-sources
-          path: /tmp/standard-sources.tar.gz
+          name: ducklake-standard-${{ matrix.arch }}
+          path: |
+            governance/ducklake-standard/evidence/
+            governance/ducklake-standard/control-evidence/
+            governance/ducklake-standard/guard-evidence/
           retention-days: 7
           if-no-files-found: error
+      - name: Stop ephemeral CI resources
+        if: always()
+        run: |
+          docker ps -aq --filter name=dq- | xargs -r docker rm -f
+          docker compose -f governance/ducklake-standard/docker-compose.yml down
+          docker buildx rm standard || true

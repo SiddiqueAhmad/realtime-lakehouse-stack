@@ -1,0 +1,54 @@
+name: ducklake-standard-pg
+x-storage: &storage
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin123
+  AWS_REGION: us-east-1
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: governance
+      POSTGRES_USER: governance
+      POSTGRES_PASSWORD: governance
+    volumes: [pgdata:/var/lib/postgresql]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U governance -d governance]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes: [minio-data:/data]
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - mc alias set local http://minio:9000 minioadmin minioadmin123; mc mb --ignore-existing local/lake
+  governed-query:
+    image: ${STANDARD_IMAGE:-ducklake-standard:patched}
+    entrypoint: [governed-delta-demo]
+    environment:
+      <<: *storage
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+  ducklake-fixture-loader:
+    image: ${STANDARD_IMAGE:-ducklake-standard:patched}
+    entrypoint: [seed-ducklake-fixture]
+    environment:
+      <<: *storage
+      DATABASE_URL: postgresql://governance:governance@postgres:5432/governance
+    volumes: ['../delta-policast-sme-demo/fixtures:/fixtures:ro']
+volumes:
+  pgdata:
+  minio-data:
