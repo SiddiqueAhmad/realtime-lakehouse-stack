@@ -1,6 +1,7 @@
 mod catalog;
 mod cli;
 mod control_plane;
+mod ducklake_adapter;
 mod iceberg_adapter;
 mod principal_lookup;
 mod query_runtime;
@@ -17,7 +18,7 @@ async fn main() -> Result<()> {
     let args = cli::Args::parse(std::env::args().skip(1).collect())?;
     query_runtime::validate_sql(&args.sql)?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
-    let pool = PgPoolOptions::new().max_connections(2)
+    let pool = PgPoolOptions::new().max_connections(5)
         .connect(&database_url)
         .await.context("connect to governance Postgres")?;
 
@@ -42,6 +43,9 @@ async fn main() -> Result<()> {
     let delta_options = storage::s3_options();
     let iceberg_database_url = std::env::var("ICEBERG_CATALOG_DATABASE_URL")
         .unwrap_or_else(|_| database_url.clone());
+    if registrations.iter().any(|(table, _)| table.kind == "ducklake_postgres") {
+        ducklake_adapter::register_object_store(&ctx)?;
+    }
 
     for (registration, manifest) in registrations {
         let provider: Arc<dyn TableProvider> = match registration.kind.as_str() {
@@ -57,7 +61,14 @@ async fn main() -> Result<()> {
                 &registration.source_config,
                 &registration.table_config,
             ).await.with_context(|| format!("open registered Iceberg v3 table {:?}", registration.key))?,
-            other => bail!("UNSUPPORTED_SOURCE: {other:?}; supported adapters are delta and iceberg_sql"),
+            "ducklake_postgres" => ducklake_adapter::open_provider(
+                pool.clone(),
+                &registration.source_config,
+                &registration.table_config,
+            ).await.with_context(|| format!("open registered DuckLake table {:?}", registration.key))?,
+            other => bail!(
+                "UNSUPPORTED_SOURCE: {other:?}; supported adapters are delta, iceberg_sql and ducklake_postgres"
+            ),
         };
 
         let governed = query_runtime::ReadBoundary::new(
