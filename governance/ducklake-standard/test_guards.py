@@ -52,6 +52,14 @@ def main():
         for row in actual:row.setdefault('region',None)
         equal(actual,new+[{**records([1])[0],'region':None}]);assert suite.columns(cat)==columns
         report.append('GUARD-06 concurrent stale append rolls back atomically and fresh-schema retry succeeds')
+        suite.current_case='GUARD-07';cat=suite.init();snap=suite.write(cat,records([1]))['snapshot']
+        suite.call('pin',cat,token='retained',snapshot=snap)
+        suite.write(cat,records([2]),'append')
+        for index in range(12):
+            other=suite.init(f'_churn{index}');suite.write(other,records([index]))
+        equal(suite.rows(cat,token='retained'),records([1]))
+        suite.exact(cat,records([1,2]))
+        report.append('GUARD-07 pinned reader survives catalog-pool cache eviction and catalog churn')
     finally:
         (suite.output/'guards.json').write_text(json.dumps({'passed':report},indent=2));suite.close()
     for row in report:print('PASS '+row)

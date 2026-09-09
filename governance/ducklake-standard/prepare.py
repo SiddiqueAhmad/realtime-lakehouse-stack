@@ -125,7 +125,7 @@ tempfile = { workspace = true }
         let p=backend::catalog_pool(&self.pool,cat,false).await?;
         pools.insert(cat.to_owned(),p.clone()); Ok(p)
     }''')
-    s=replace(s,'    pool: PgPool, store:', '    pools: tokio::sync::Mutex<HashMap<String,PgPool>>,\n    pool: PgPool, store:')
+    s=replace(s,'    pool: PgPool, store:', '    pools: tokio::sync::Mutex<backend::CatalogPoolCache>,\n    pool: PgPool, store:')
     s=replace(s,'MulticatalogProvider::with_pool(self.pool.clone(),cat).await?', 'datafusion_ducklake::PostgresMetadataProvider::from_pool(self.catalog_pool(cat).await?)')
     s=replace(s,'MulticatalogProvider::with_pool(self.pool.clone(),&cat).await?', 'datafusion_ducklake::PostgresMetadataProvider::from_pool(self.catalog_pool(&cat).await?)', count=2)
     s=replace(s,'            #[cfg(feature = "df54")]\n            bail!("UNSUPPORTED: Policast is pinned to DataFusion 53; DF54 has no governed adapter");\n            #[cfg(not(feature = "df54"))]\n', '')
@@ -155,7 +155,7 @@ tempfile = { workspace = true }
 '''+s[b:]
     s=replace(s,'let mut tx=self.pool.begin().await?; sqlx::query("SELECT catalog_id FROM ducklake_catalog WHERE catalog_name=$1 FOR UPDATE").bind(&cat).fetch_one(&mut *tx).await?', 'let mut tx=self.catalog_pool(&cat).await?.begin().await?; sqlx::query("SELECT value FROM ducklake_metadata WHERE key=\'next_snapshot_id\' AND scope IS NULL FOR UPDATE").fetch_one(&mut *tx).await?')
     s=replace(s,'        let mgr=MulticatalogManager::new(self.pool.clone());\n','')
-    s=replace(s,'let mut w=Worker{pool:', 'let mut w=Worker{pools:tokio::sync::Mutex::new(HashMap::new()),pool:')
+    s=replace(s,'let mut w=Worker{pool:', 'let mut w=Worker{pools:tokio::sync::Mutex::new(backend::CatalogPoolCache::default()),pool:')
     (src/'worker.rs').write_text(s)
     shutil.copy(HERE/'Cargo.toml',root/'Cargo.toml')
     lock=HERE/'Cargo.lock'

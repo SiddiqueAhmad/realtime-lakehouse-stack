@@ -69,7 +69,8 @@ failures (`TT-05`, `SCHEMA-08`). Infrastructure failures cannot satisfy this con
 It then builds `FIXES=1` with the SAME lock, executes all 54 case handlers and the
 unchanged 20 governance cases, then verifies invalid IDs, valid empty snapshots,
 physical catalog layout, conflict typing, atomic rollback and fresh-schema retry.
-Both AMD64 and ARM64 run natively with 4 GiB/no-swap builders.
+Both AMD64 and ARM64 run natively with 4 GiB/no-swap builders. The workflow runs on
+relevant pull requests and main-branch changes, not only this feature branch.
 
 A backend change does not inherit passes from another backend. Upstream 0.7.0's
 standard PostgreSQL writer lacks native UPDATE/DELETE/upsert, type promotion,
@@ -87,7 +88,16 @@ Standard catalog shape is tested, but cross-engine DuckDB write interoperability
 full DuckLake-spec conformance, and migration from the experimental catalog are NOT
 claimed. Start with fresh catalogs, not an in-place switch of the older demo.
 
-Before the conflict-decoding correction, both target regressions and the original
-20 governance cases passed, but three broader cases failed on that decoding error.
-The corrected commit must complete its own CI run; this README does not predeclare
-its outcome. The PR records inspected, commit-specific final evidence.
+## Long-lived worker resource discipline
+
+The test worker keeps at most eight idle catalog pools in an LRU cache. Eviction
+drops only the cache handle: pinned readers/prepared writers retain their own
+clones. It must never call `Pool::close` on eviction and invalidate active users.
+This fixes the harness exhausting PostgreSQL connections after 43 replacement
+stress rounds. The 50-round tests, writer counts, assertions, PostgreSQL connection
+limit and per-pool limit are unchanged. Rust cache tests and a real pinned-reader
+churn guard cover the lifecycle.
+
+The PR records inspected commit-specific CI evidence. Build success, expected
+limitations and performance measurements must not be advertised as 54 passing
+behavioral tests or as production CDC/maintenance qualification.

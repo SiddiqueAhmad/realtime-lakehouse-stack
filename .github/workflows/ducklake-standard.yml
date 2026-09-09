@@ -1,12 +1,21 @@
 name: DuckLake standard PostgreSQL and Policast
 on:
+  pull_request:
+    paths:
+      - 'governance/ducklake-standard/**'
+      - 'governance/delta-policast-sme-demo/**'
+      - '.github/workflows/ducklake-standard.yml'
   push:
-    branches: [feature/ducklake-standard-pg-df54]
+    branches: [main]
+    paths:
+      - 'governance/ducklake-standard/**'
+      - 'governance/delta-policast-sme-demo/**'
+      - '.github/workflows/ducklake-standard.yml'
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ducklake-standard-${{ github.ref }}
+  group: ducklake-standard-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   qualification:
@@ -79,6 +88,16 @@ jobs:
         run: |
           mkdir -p governance/ducklake-standard/evidence
           docker exec buildx_buildkit_standard0 sh -c 'for f in memory.max memory.swap.max memory.peak memory.events; do echo "== $f =="; cat /sys/fs/cgroup/$f; done' > governance/ducklake-standard/evidence/build-memory.txt 2>&1 || true
+          for flavor in upstream patched; do
+            if docker image inspect "ducklake-standard:$flavor" >/dev/null 2>&1; then
+              dest="governance/ducklake-standard/evidence/${flavor}-source"
+              mkdir -p "$dest"
+              cid=$(docker create --entrypoint /bin/true "ducklake-standard:$flavor")
+              docker cp "$cid:/usr/share/qualification/." "$dest/"
+              docker rm "$cid"
+              docker image inspect "ducklake-standard:$flavor" > "$dest/image.json"
+            fi
+          done
           git archive HEAD governance/ducklake-standard governance/delta-policast-sme-demo > governance/ducklake-standard/evidence/tested-source.tar
           python3 - <<'PY'
           import json, os
