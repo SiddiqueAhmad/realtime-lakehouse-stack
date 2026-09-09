@@ -1,0 +1,29 @@
+[package]
+name = "ducklake-qualification-df54"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+[features]
+default = ["df54"]
+df54 = []
+[[bin]]
+name = "ducklake-qualification"
+path = "../src/main.rs"
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls-ring"] }
+datafusion = "=54.0.0"
+datafusion-ducklake = { version = "=0.7.0", default-features = false, features = ["write-postgres", "tls-rustls-ring"] }
+object_store = { version = "=0.13.2", features = ["aws"] }
+url = "2.5"
+[profile.dev]
+debug = 0
+incremental = false
+[profile.test]
+debug = 0
+incremental = false
